@@ -1,6 +1,6 @@
+use crate::simulation::{build_depth_pressure, step_objects, step_simulation, Cell, Grid, MAX_WATER_KG};
 use crate::textures::TextureAssets;
 use bevy::{color::palettes::css::*, prelude::*};
-use rand::Rng;
 
 pub struct GridPlugin;
 
@@ -21,49 +21,38 @@ impl Plugin for GridPlugin {
                 handle_heatmap_toggle,
                 update_heatmap_button,
                 handle_reset,
+                animate_gate,
             ),
         );
     }
 }
 
-const TILE_SIZE: f32 = 16.0;
+// Allow Grid (defined in simulation) to be used as a Bevy resource.
+impl Resource for Grid {}
+
 const PANEL_WIDTH: f32 = 110.0;
 
 #[derive(Resource, Clone)]
 pub struct GridConfig {
     pub window_width: f32,
     pub window_height: f32,
+    pub tile_size: f32,
 }
 
 impl GridConfig {
     fn offset_x(&self) -> f32 {
-        -(self.window_width / 2.0) + PANEL_WIDTH + (TILE_SIZE / 2.0)
+        -(self.window_width / 2.0) + PANEL_WIDTH + (self.tile_size / 2.0)
     }
     fn offset_y(&self) -> f32 {
-        -(self.window_height / 2.0) + (TILE_SIZE / 2.0)
+        -(self.window_height / 2.0) + (self.tile_size / 2.0)
     }
-}
-const MAX_WATER_KG: f32 = 1000.0;
-
-#[derive(Clone, Debug)]
-enum Cell {
-    Air,
-    Water(f32),
-    Object(f32),
-    Wall,
-}
-
-#[derive(Resource)]
-struct Grid {
-    width: usize,
-    height: usize,
-    cells: Vec<Cell>,
 }
 
 #[derive(Resource)]
 struct GameState {
     water_flow: bool,
     show_pressure: bool,
+    gate_progress: usize, // how many cells are open on each side from center (0 = fully closed)
 }
 
 #[derive(Resource)]
@@ -81,36 +70,6 @@ struct ResetButton;
 #[derive(Component)]
 struct HeatmapButton;
 
-impl Grid {
-    fn init(width: usize, height: usize) -> Grid {
-        let mut grid = Grid {
-            width: width,
-            height: height,
-            cells: vec![Cell::Air; width * height],
-        };
-
-        for x in 0..width {
-            grid.set_cell(x, height - 1, Cell::Wall);
-        }
-        for y in 0..height {
-            grid.set_cell(0, y, Cell::Wall);
-            grid.set_cell(width - 1, y, Cell::Wall);
-        }
-
-        grid.set_cell((width / 2) - 1, 0, Cell::Water(MAX_WATER_KG * 0.5));
-
-        grid
-    }
-
-    fn set_cell(&mut self, x: usize, y: usize, cell: Cell) {
-        self.cells[y * self.width + x] = cell;
-    }
-
-    fn get_cell(&self, x: usize, y: usize) -> &Cell {
-        &self.cells[y * self.width + x]
-    }
-}
-
 #[derive(Component)]
 struct Tile {
     x: usize,
@@ -118,8 +77,9 @@ struct Tile {
 }
 
 fn setup(mut commands: Commands, config: Res<GridConfig>) {
-    let width = ((config.window_width - PANEL_WIDTH) / TILE_SIZE) as usize;
-    let height = (config.window_height / TILE_SIZE) as usize;
+    let tile_size = config.tile_size;
+    let width = ((config.window_width - PANEL_WIDTH) / tile_size) as usize;
+    let height = (config.window_height / tile_size) as usize;
     let offset_x = config.offset_x();
     let offset_y = config.offset_y();
 
@@ -127,6 +87,7 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
     commands.insert_resource(GameState {
         water_flow: false,
         show_pressure: false,
+        gate_progress: 0,
     });
     commands.insert_resource(SelectedWeight(200.0));
     commands.insert_resource(Grid::init(width, height));
@@ -137,13 +98,13 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                 Sprite::from_color(
                     BLUE,
                     Vec2 {
-                        x: (TILE_SIZE),
-                        y: (TILE_SIZE),
+                        x: tile_size,
+                        y: tile_size,
                     },
                 ),
                 Transform::from_xyz(
-                    offset_x + (col as f32 * TILE_SIZE),
-                    offset_y + (row as f32 * TILE_SIZE),
+                    offset_x + (col as f32 * tile_size),
+                    offset_y + (row as f32 * tile_size),
                     0.0,
                 ),
                 Tile { x: col, y: row },
@@ -169,7 +130,7 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
             BackgroundColor(Color::srgb(0.1, 0.18, 0.38)),
         ))
         .with_children(|parent| {
-            for &weight in &[200.0f32, 500.0, 1000.0, 2000.0] {
+            for &weight in &[200.0f32, 500.0, 1000.0, 2000.0, 5000.0] {
                 let is_selected = weight == 200.0;
                 parent
                     .spawn((
@@ -284,19 +245,26 @@ fn render_grid(
     mut query: Query<(&Tile, &mut Sprite)>,
     textures: Res<TextureAssets>,
     mut state: ResMut<GameState>,
+    time: Res<Time>,
 ) {
     if state.show_pressure {
         render_heat_grid(grid, query);
         return;
     }
+    // Switch froth frames every 0.4s — gives the illusion of churning bubbles.
+    let froth = if (time.elapsed_secs() % 0.8) < 0.4 {
+        &textures.froth_frame1
+    } else {
+        &textures.froth_frame2
+    };
     for (tile, mut sprite) in &mut query {
         match grid.cells[tile.y * grid.width + tile.x] {
             Cell::Air => {
                 sprite.image = Handle::default();
                 sprite.color = WHITE.into();
             }
-            Cell::Water(kg) if kg < MAX_WATER_KG * 0.1 => {
-                sprite.image = textures.froth_frame1.clone().clone();
+            Cell::Water(kg) if kg < MAX_WATER_KG * 0.03 => {
+                sprite.image = froth.clone();
                 sprite.color = WHITE.into();
             }
             Cell::Water(kg) => {
@@ -319,8 +287,6 @@ fn render_grid(
 }
 
 /// Maps t ∈ [0,1] through a five-stop rainbow: blue → cyan → green → yellow → red.
-/// Each stop occupies 25% of the range, giving much more perceptual contrast
-/// in the midtones than a single-hue white-to-red gradient.
 fn pressure_color(t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
     let (r, g, b) = if t < 0.25 {
@@ -444,7 +410,39 @@ fn handle_reset(
         if *interaction == Interaction::Pressed {
             *grid = Grid::init(grid.width, grid.height);
             state.water_flow = false;
+            state.gate_progress = 0;
         }
+    }
+}
+
+/// Opens the gate at y=1 one cell per side per frame when the inlet is ON,
+/// closes it one cell per side per frame when OFF (overwrites any water).
+fn animate_gate(mut grid: ResMut<Grid>, mut state: ResMut<GameState>) {
+    let center = grid.width / 2;
+    // Left and right interiors are not always equal (odd-width grids round center down),
+    // so track each side's limit independently.
+    let left_max = center - 1;            // leftmost valid cell is x=1
+    let right_max = grid.width - 2 - center; // rightmost valid cell is x=width-2
+    let max_progress = left_max.max(right_max);
+
+    if state.water_flow && state.gate_progress < max_progress {
+        let p = state.gate_progress;
+        if p < left_max {
+            grid.set_cell(center - p - 1, 1, Cell::Air);
+        }
+        if p < right_max {
+            grid.set_cell(center + p, 1, Cell::Air);
+        }
+        state.gate_progress += 1;
+    } else if !state.water_flow && state.gate_progress > 0 {
+        let p = state.gate_progress;
+        if p <= left_max {
+            grid.set_cell(center - p, 1, Cell::Wall);
+        }
+        if p <= right_max {
+            grid.set_cell(center + p - 1, 1, Cell::Wall);
+        }
+        state.gate_progress -= 1;
     }
 }
 
@@ -467,8 +465,8 @@ fn handle_input(
                     return;
                 }
                 let grid_x =
-                    ((world_x + config.window_width / 2.0 - PANEL_WIDTH) / TILE_SIZE) as usize;
-                let grid_y = ((world_y + config.window_height / 2.0) / TILE_SIZE) as usize;
+                    ((world_x + config.window_width / 2.0 - PANEL_WIDTH) / config.tile_size) as usize;
+                let grid_y = ((world_y + config.window_height / 2.0) / config.tile_size) as usize;
                 if grid_x < grid.width
                     && grid_y < grid.height
                     && !matches!(grid.get_cell(grid_x, grid_y), Cell::Wall)
@@ -487,8 +485,8 @@ fn handle_input(
                     return;
                 }
                 let grid_x =
-                    ((world_x + config.window_width / 2.0 - PANEL_WIDTH) / TILE_SIZE) as usize;
-                let grid_y = ((world_y + config.window_height / 2.0) / TILE_SIZE) as usize;
+                    ((world_x + config.window_width / 2.0 - PANEL_WIDTH) / config.tile_size) as usize;
+                let grid_y = ((world_y + config.window_height / 2.0) / config.tile_size) as usize;
                 if grid_x < grid.width && grid_y < grid.height {
                     println!(
                         "{grid_x}, {grid_y}: {:?} pressure: {}",
@@ -511,12 +509,16 @@ fn handle_input(
     if keyboard.just_pressed(KeyCode::Digit4) {
         selected.0 = 2000.0;
     }
+    if keyboard.just_pressed(KeyCode::Digit5) {
+        selected.0 = 5000.0;
+    }
     if keyboard.just_pressed(KeyCode::KeyX) {
         state.water_flow = !state.water_flow;
     }
     if keyboard.just_pressed(KeyCode::KeyR) {
         *grid = Grid::init(grid.width, grid.height);
         state.water_flow = false;
+        state.gate_progress = 0;
     }
     if keyboard.just_pressed(KeyCode::KeyM) {
         state.show_pressure = !state.show_pressure;
@@ -528,273 +530,16 @@ fn flow_water(mut grid: ResMut<Grid>, state: Res<GameState>) {
         return;
     }
     let flow_rate: f32 = MAX_WATER_KG;
-    // read from bottom of grid
     let width = grid.width;
     for x in 1..width - 1 {
         let new_cell = match grid.cells[x] {
-            // read
             Cell::Air => Cell::Water(flow_rate),
             Cell::Water(kg) => Cell::Water((kg + flow_rate).min(MAX_WATER_KG)),
             Cell::Object(weight) => Cell::Object(weight),
             Cell::Wall => Cell::Wall,
         };
-        grid.set_cell(x, 0, new_cell); // write
+        grid.set_cell(x, 0, new_cell);
     }
-}
-
-fn water_fill(cell: &Cell) -> Option<f32> {
-    match cell {
-        Cell::Water(f) => Some(*f),
-        _ => None,
-    }
-}
-
-fn flow_capacity(cell: &Cell) -> Option<f32> {
-    match cell {
-        Cell::Water(f) => Some(*f),
-        Cell::Air => Some(0.0),
-        _ => None,
-    }
-}
-
-fn step_simulation(grid: &Grid) -> Vec<Cell> {
-    let width = grid.width;
-    let height = grid.height;
-
-    // delta[i] accumulates the net change in water for each cell this tick.
-    // Positive = gaining water, negative = losing water.
-    let mut delta = vec![0.0f32; width * height];
-
-    for y in 0..height {
-        for x in 1..width - 1 {
-            let idx = y * width + x;
-
-            let fill = match water_fill(&grid.cells[idx]) {
-                Some(f) => f,
-                None => continue,
-            };
-
-            // For each passable neighbor, calculate transfer and record it
-            // as a loss for this cell and a gain for the neighbor.
-            let neighbors: &[(isize, isize)] = &[(0, -1), (0, 1), (-1, 0), (1, 0)];
-            for (dx, dy) in neighbors {
-                let nx = x as isize + dx;
-                let ny = y as isize + dy;
-                if nx < 0 || ny < 0 || nx >= width as isize || ny >= height as isize {
-                    continue;
-                }
-                let nidx = ny as usize * width + nx as usize;
-                if let Some(neighbor_fill) = flow_capacity(&grid.cells[nidx]) {
-                    let transfer = (fill - neighbor_fill).max(0.0) * 0.25;
-                    delta[idx] -= transfer; // this cell loses water
-                    delta[nidx] += transfer; // neighbor gains water
-                }
-            }
-        }
-    }
-
-    // Apply all deltas at once to produce the new cell state
-    let mut new_cells = grid.cells.clone();
-    for i in 0..new_cells.len() {
-        if delta[i] == 0.0 {
-            continue;
-        }
-        let current = flow_capacity(&grid.cells[i]).unwrap_or(0.0);
-        let new_kg = (current + delta[i]).clamp(0.0, MAX_WATER_KG);
-        new_cells[i] = if new_kg < 1.0 {
-            Cell::Air
-        } else {
-            Cell::Water(new_kg)
-        };
-    }
-
-    new_cells
-}
-
-fn water_pressure(cell: &Cell) -> f32 {
-    match cell {
-        Cell::Water(f) => *f,
-        _ => 0.0,
-    }
-}
-
-fn object_weight(cell: &Cell) -> Option<f32> {
-    match cell {
-        Cell::Object(w) => Some(*w),
-        _ => None,
-    }
-}
-
-// Represents an object's intention to move this tick.
-#[derive(Debug)]
-struct MoveIntent {
-    src: usize,    // index of the object's current cell
-    dst: usize,    // index of the cell it wants to move into
-    weight: f32,   // the object's weight
-    pressure: f32, // pressure from the pushing side (fills the vacated cell)
-}
-
-fn build_depth_pressure(grid: &Grid) -> Vec<f32> {
-    let width = grid.width;
-    let height = grid.height;
-    let mut depth = vec![0.0f32; width * height];
-    let decay: f32 = 0.1f32.powf(1.0 / 10.0);
-    let inlet_pressure: f32 = MAX_WATER_KG * 3.0;
-
-    for x in 0..width {
-        let mut water_below: Vec<(f32, usize)> = vec![(inlet_pressure, 0)]; // inlet as seed
-        for y in 0..height {
-            let pressure: f32 = water_below
-                .iter()
-                .map(|&(kg, wy)| kg * decay.powi(y as i32 - wy as i32))
-                .sum();
-
-            match grid.cells[y * width + x] {
-                Cell::Water(kg) => {
-                    depth[y * width + x] = pressure;
-                    water_below.push((kg, y));
-                }
-                Cell::Object(weight) => {
-                    depth[y * width + x] = (pressure - weight).max(0.0);
-                    // don't push
-                }
-                Cell::Wall => {
-                    depth[y * width + x] = 0.0;
-                    // immovable — don't modify water_below
-                }
-                Cell::Air => {
-                    water_below.clear();
-                    depth[y * width + x] = 0.0;
-                }
-            }
-        }
-    }
-    depth
-}
-
-fn step_objects(grid: &Grid) -> Vec<Cell> {
-    let width = grid.width;
-    let height = grid.height;
-
-    // Build depth-based pressure table so cells deeper in the water column
-    // feel higher pressure regardless of local fill level equalisation.
-    let depth = build_depth_pressure(grid);
-
-    // Pass 1: collect all intended moves without writing anything yet.
-    let mut intents: Vec<MoveIntent> = Vec::new();
-    for y in (0..height).rev() {
-        for x in 0..width {
-            let idx = y * width + x;
-
-            let weight = match object_weight(&grid.cells[idx]) {
-                Some(w) => w,
-                None => continue,
-            };
-
-            // Horizontal pressure: fill level difference of adjacent water cells.
-            let p_left = if x > 0 {
-                water_pressure(&grid.cells[y * width + (x - 1)])
-            } else {
-                0.0
-            };
-            let p_right = if x < width - 1 {
-                water_pressure(&grid.cells[y * width + (x + 1)])
-            } else {
-                0.0
-            };
-            let x_force = p_left - p_right;
-
-            // Vertical pressure: depth[idx] for objects is (raw_upward_pressure - weight).max(0.0).
-            // A positive value means buoyancy exceeds the object's weight — no need
-            // to compare against weight again.
-            let y_force = depth[idx];
-
-            let threshold = 0.1;
-            // Only move along the dominant axis.
-            let (dx, dy) = if y_force >= x_force.abs() {
-                let dy = if y_force > threshold { 1isize } else { 0 };
-                (0isize, dy)
-            } else {
-                let dx = if x_force.abs() > threshold {
-                    x_force.signum() as isize
-                } else {
-                    0
-                };
-                (dx, 0)
-            };
-
-            let pushing_pressure = x_force.abs().max(y_force);
-
-            let nx = x as isize + dx;
-            let ny = y as isize + dy;
-            if nx < 0 || ny < 0 || nx >= width as isize || ny >= height as isize {
-                continue;
-            }
-            let nidx = ny as usize * width + nx as usize;
-
-            // Vertical: y_force already factors in weight (net buoyancy).
-            // Horizontal: x_force must still exceed weight.
-            if dy != 0 {
-                // buoyancy exceeds weight — move
-            } else if x_force.abs() <= weight {
-                continue;
-            } else if dx == 0 {
-                continue;
-            }
-
-            //println!("Intent: src={idx} dst={nidx}");
-            intents.push(MoveIntent {
-                src: idx,
-                dst: nidx,
-                weight,
-                pressure: pushing_pressure,
-            });
-        }
-    }
-
-    // Pass 2: group intents by destination.
-    // For each destination, if multiple objects want it, pick one randomly.
-    let mut by_dst: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
-    for (i, intent) in intents.iter().enumerate() {
-        by_dst.entry(intent.dst).or_default().push(i);
-    }
-
-    // Build a set of winning intent indices — one per destination, chosen randomly.
-    let mut rng = rand::thread_rng();
-    let mut winners: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for candidates in by_dst.values() {
-        let winner = candidates[rng.r#gen::<usize>() % candidates.len()];
-        // println!(
-        //     "Block at {winner} won out of {} with {:?}",
-        //     candidates.len(),
-        //     intents[winner]
-        // );
-        winners.insert(winner);
-    }
-
-    // Pass 3: apply winning moves, skipping any whose src is another winner's dst.
-    // This prevents a winner from overwriting a cell that another winner is vacating into.
-    let mut moved_srcs: std::collections::HashSet<usize> = std::collections::HashSet::new();
-
-    // Need to sort by y axis with top-down order
-    let mut sorted_winners: Vec<usize> = winners.into_iter().collect();
-    sorted_winners.sort_by(|&a, &b| intents[b].src.cmp(&intents[a].src));
-    let mut new_cells = grid.cells.clone();
-    for &i in &sorted_winners {
-        let intent = &intents[i];
-        if matches!(new_cells[intent.dst], Cell::Wall) {
-            continue; // walls are always impassable
-        }
-        if matches!(new_cells[intent.dst], Cell::Object(_)) && !moved_srcs.contains(&intent.dst) {
-            continue; // dst is occupied by an object that hasn't moved away yet
-        }
-        let vacated = new_cells[intent.dst].clone();
-        new_cells[intent.dst] = Cell::Object(intent.weight);
-        new_cells[intent.src] = vacated;
-        moved_srcs.insert(intent.src);
-    }
-
-    new_cells
 }
 
 fn simulate_objects(mut grid: ResMut<Grid>, state: Res<GameState>) {
@@ -809,222 +554,4 @@ fn simulate_flow(mut grid: ResMut<Grid>, state: Res<GameState>) {
         return;
     }
     grid.cells = step_simulation(&grid);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Helper to build a small grid manually for testing
-    fn make_grid(width: usize, height: usize, cells: Vec<Cell>) -> Grid {
-        Grid {
-            width,
-            height,
-            cells,
-        }
-    }
-
-    #[test]
-    fn object_pushed_by_water() {
-        // 3x3 grid:
-        //   y=2: [Air,     Air,      Air]
-        //   y=1: [Air,     Object,   Air]   ← object at (1,1), weight 10.0
-        //   y=0: [Air,     Water,    Air]   ← water at (1,0), fill 1.0 = 1000kg
-        //
-        // Water below pushes upward. Force = 1.0 * 1000 = 1000kg > 10kg weight.
-        // Object should move from (1,1) to (1,2). Source (1,1) should become water.
-        let mut cells = vec![Cell::Air; 9];
-        cells[0 * 3 + 1] = Cell::Water(MAX_WATER_KG); // (1,0)
-        cells[1 * 3 + 1] = Cell::Object(10.0); // (1,1)
-        let grid = make_grid(3, 3, cells);
-
-        let result = step_objects(&grid);
-
-        // Object should have moved to (1,2)
-        assert!(
-            matches!(result[2 * 3 + 1], Cell::Object(_)),
-            "Object should have moved to (1,2)"
-        );
-        // Source (1,1) should now be water
-        assert!(
-            matches!(result[1 * 3 + 1], Cell::Air),
-            "Vacated cell (1,1) should be air"
-        );
-    }
-
-    #[test]
-    fn heavy_object_stays_put() {
-        // Same layout but object weighs 2000kg — more than 1000kg of water pressure.
-        let mut cells = vec![Cell::Air; 15];
-        cells[0 * 3 + 1] = Cell::Water(MAX_WATER_KG);
-        cells[1 * 3 + 1] = Cell::Water(MAX_WATER_KG);
-        cells[2 * 3 + 1] = Cell::Object(4000.0);
-        let grid = make_grid(3, 5, cells);
-
-        let result = step_objects(&grid);
-
-        // Object should NOT have moved
-        assert!(
-            matches!(result[2 * 3 + 1], Cell::Object(_)),
-            "Heavy object should stay at (2,1)"
-        );
-        // Cell above should still be air
-        assert!(
-            matches!(result[3 * 3 + 1], Cell::Air),
-            "Cell above should remain air"
-        );
-    }
-
-    #[test]
-    fn water_spreads_to_air_neighbor() {
-        // 3x3 grid, water at center (x=1, y=1), everything else Air
-        let mut cells = vec![Cell::Air; 9];
-        cells[1 * 3 + 1] = Cell::Water(MAX_WATER_KG);
-        let grid = make_grid(3, 3, cells);
-
-        let result = step_simulation(&grid);
-
-        let above_idx = 2 * 3 + 1;
-        let has_water_above = matches!(result[above_idx], Cell::Water(f) if f > 0.0);
-        assert!(has_water_above, "Water should have spread upward to (1,2)");
-    }
-
-    #[test]
-    fn water_is_conserved_over_ticks() {
-        // 5x5 grid with walls on edges, water in the middle
-        // Walls at x=0, x=4, y=0, y=4 — water at (2,2)
-        let mut cells = vec![Cell::Air; 25];
-        for x in 0..5 {
-            cells[0 * 5 + x] = Cell::Wall;
-        }
-        for x in 0..5 {
-            cells[4 * 5 + x] = Cell::Wall;
-        }
-        for y in 0..5 {
-            cells[y * 5 + 0] = Cell::Wall;
-        }
-        for y in 0..5 {
-            cells[y * 5 + 4] = Cell::Wall;
-        }
-        cells[2 * 5 + 2] = Cell::Water(MAX_WATER_KG);
-
-        let mut grid = make_grid(5, 5, cells);
-
-        // Count total water before
-        let total_before: f32 = grid
-            .cells
-            .iter()
-            .filter_map(|c| {
-                if let Cell::Water(f) = c {
-                    Some(*f)
-                } else {
-                    None
-                }
-            })
-            .sum();
-
-        // Run 10 ticks
-        for _ in 0..10 {
-            grid.cells = step_simulation(&grid);
-        }
-
-        // Count total water after
-        let total_after: f32 = grid
-            .cells
-            .iter()
-            .filter_map(|c| {
-                if let Cell::Water(f) = c {
-                    Some(*f)
-                } else {
-                    None
-                }
-            })
-            .sum();
-
-        println!("Water before: {total_before:.4}, after: {total_after:.4}");
-        assert!(
-            (total_before - total_after).abs() < 0.1,
-            "Water should be conserved, lost {:.4}",
-            total_before - total_after
-        );
-    }
-
-    #[test]
-    fn vertical_line_no_merge() {
-        // 5x3 grid (width=1 won't work due to wall logic, use width=3):
-        // y=4: Air
-        // y=3: Object(200.0)
-        // y=2: Object(200.0)
-        // y=1: Object(200.0)
-        // y=0: Water(1.0)   ← pushes upward
-        let mut cells = vec![Cell::Air; 5 * 3];
-        cells[0 * 3 + 1] = Cell::Water(MAX_WATER_KG); // y=0
-        cells[1 * 3 + 1] = Cell::Object(200.0); // y=1
-        cells[2 * 3 + 1] = Cell::Object(200.0); // y=2
-        cells[3 * 3 + 1] = Cell::Object(200.0); // y=3
-        let grid = make_grid(3, 5, cells);
-
-        let result = step_objects(&grid);
-
-        // No cell should contain two objects — check count of Object cells
-        let object_count = result
-            .iter()
-            .filter(|c| matches!(c, Cell::Object(_)))
-            .count();
-        assert_eq!(object_count, 3, "Should still have exactly 3 objects");
-    }
-
-    #[test]
-    fn hold_the_line() {
-        // 5x3 grid (width=1 won't work due to wall logic, use width=3):
-        // y=4: Air
-        // y=3: Object(200.0)
-        // y=2: Object(200.0)
-        // y=1: Object(200.0)
-        // y=0: Water(1.0)   ← pushes upward
-        let mut cells = vec![Cell::Air; 5 * 3];
-        cells[0 * 3 + 0] = Cell::Water(MAX_WATER_KG); // y=0
-        cells[0 * 3 + 1] = Cell::Water(MAX_WATER_KG); // y=0
-        cells[0 * 3 + 2] = Cell::Water(MAX_WATER_KG); // y=0
-        cells[1 * 3 + 0] = Cell::Water(MAX_WATER_KG); // y=1
-        cells[1 * 3 + 1] = Cell::Water(MAX_WATER_KG); // y=1
-        cells[1 * 3 + 2] = Cell::Water(MAX_WATER_KG); // y=1
-        cells[2 * 3 + 0] = Cell::Object(200.0); // y=1
-        cells[2 * 3 + 1] = Cell::Object(200.0); // y=2
-        cells[2 * 3 + 2] = Cell::Object(200.0); // y=3
-        let grid = make_grid(3, 5, cells);
-
-        let result = step_objects(&grid);
-
-        // No cell should contain two objects — check count of Object cells
-        let object_count = result
-            .iter()
-            .filter(|c| matches!(c, Cell::Object(_)))
-            .count();
-        assert_eq!(object_count, 3, "Should still have exactly 3 objects");
-        assert!(
-            !matches!(result[2 * 3 + 0], Cell::Object(_)),
-            "not object at (0,2)"
-        );
-        assert!(
-            !matches!(result[2 * 3 + 1], Cell::Object(_)),
-            "not object at (1,2)"
-        );
-        assert!(
-            !matches!(result[2 * 3 + 2], Cell::Object(_)),
-            "not object at (2,2)"
-        );
-        assert!(
-            matches!(result[3 * 3 + 0], Cell::Object(_)),
-            "object at (0,3)"
-        );
-        assert!(
-            matches!(result[3 * 3 + 1], Cell::Object(_)),
-            "object at (1,3)"
-        );
-        assert!(
-            matches!(result[3 * 3 + 2], Cell::Object(_)),
-            "object at (2,3)"
-        );
-    }
 }
