@@ -16,17 +16,33 @@ impl Plugin for GridPlugin {
                 handle_input,
                 handle_weight_buttons,
                 update_button_colors,
+                handle_inlet_toggle,
+                update_inlet_button,
+                handle_heatmap_toggle,
+                update_heatmap_button,
+                handle_reset,
             ),
         );
     }
 }
 
 const TILE_SIZE: f32 = 16.0;
-const WINDOW_WIDTH: f32 = 800.0;
-const WINDOW_HEIGHT: f32 = 600.0;
 const PANEL_WIDTH: f32 = 110.0;
-const OFFSET_X: f32 = -(WINDOW_WIDTH / 2.0) + PANEL_WIDTH + (TILE_SIZE / 2.0);
-const OFFSET_Y: f32 = -(WINDOW_HEIGHT / 2.0) + (TILE_SIZE / 2.0);
+
+#[derive(Resource, Clone)]
+pub struct GridConfig {
+    pub window_width: f32,
+    pub window_height: f32,
+}
+
+impl GridConfig {
+    fn offset_x(&self) -> f32 {
+        -(self.window_width / 2.0) + PANEL_WIDTH + (TILE_SIZE / 2.0)
+    }
+    fn offset_y(&self) -> f32 {
+        -(self.window_height / 2.0) + (TILE_SIZE / 2.0)
+    }
+}
 const MAX_WATER_KG: f32 = 1000.0;
 
 #[derive(Clone, Debug)]
@@ -34,6 +50,7 @@ enum Cell {
     Air,
     Water(f32),
     Object(f32),
+    Wall,
 }
 
 #[derive(Resource)]
@@ -55,6 +72,15 @@ struct SelectedWeight(f32);
 #[derive(Component)]
 struct WeightButton(f32);
 
+#[derive(Component)]
+struct InletButton;
+
+#[derive(Component)]
+struct ResetButton;
+
+#[derive(Component)]
+struct HeatmapButton;
+
 impl Grid {
     fn init(width: usize, height: usize) -> Grid {
         let mut grid = Grid {
@@ -64,11 +90,11 @@ impl Grid {
         };
 
         for x in 0..width {
-            grid.set_cell(x, height - 1, Cell::Object(f32::MAX));
+            grid.set_cell(x, height - 1, Cell::Wall);
         }
         for y in 0..height {
-            grid.set_cell(0, y, Cell::Object(f32::MAX));
-            grid.set_cell(width - 1, y, Cell::Object(f32::MAX));
+            grid.set_cell(0, y, Cell::Wall);
+            grid.set_cell(width - 1, y, Cell::Wall);
         }
 
         grid.set_cell((width / 2) - 1, 0, Cell::Water(MAX_WATER_KG * 0.5));
@@ -91,9 +117,11 @@ struct Tile {
     y: usize,
 }
 
-fn setup(mut commands: Commands) {
-    let width = ((WINDOW_WIDTH - PANEL_WIDTH) / TILE_SIZE) as usize;
-    let height = (WINDOW_HEIGHT / TILE_SIZE) as usize;
+fn setup(mut commands: Commands, config: Res<GridConfig>) {
+    let width = ((config.window_width - PANEL_WIDTH) / TILE_SIZE) as usize;
+    let height = (config.window_height / TILE_SIZE) as usize;
+    let offset_x = config.offset_x();
+    let offset_y = config.offset_y();
 
     commands.spawn(Camera2d);
     commands.insert_resource(GameState {
@@ -114,8 +142,8 @@ fn setup(mut commands: Commands) {
                     },
                 ),
                 Transform::from_xyz(
-                    OFFSET_X + (col as f32 * TILE_SIZE),
-                    OFFSET_Y + (row as f32 * TILE_SIZE),
+                    offset_x + (col as f32 * TILE_SIZE),
+                    offset_y + (row as f32 * TILE_SIZE),
                     0.0,
                 ),
                 Tile { x: col, y: row },
@@ -141,7 +169,7 @@ fn setup(mut commands: Commands) {
             BackgroundColor(Color::srgb(0.1, 0.18, 0.38)),
         ))
         .with_children(|parent| {
-            for &weight in &[200.0f32, 500.0, 1000.0] {
+            for &weight in &[200.0f32, 500.0, 1000.0, 2000.0] {
                 let is_selected = weight == 200.0;
                 parent
                     .spawn((
@@ -171,6 +199,83 @@ fn setup(mut commands: Commands) {
                         ));
                     });
             }
+
+            // Inlet toggle button, separated from weight buttons
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(90.0),
+                        height: Val::Px(40.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        margin: UiRect::top(Val::Px(20.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.4, 0.15, 0.15)), // starts OFF (dark red)
+                    InletButton,
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        Text::new("Inlet"),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                    ));
+                });
+
+            // Heatmap toggle button
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(90.0),
+                        height: Val::Px(40.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.3, 0.3, 0.3)),
+                    HeatmapButton,
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        Text::new("Heat"),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                    ));
+                });
+
+            // Reset button, separated from toggles
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(90.0),
+                        height: Val::Px(40.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        margin: UiRect::top(Val::Px(20.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.5, 0.15, 0.15)),
+                    ResetButton,
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        Text::new("Reset"),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                    ));
+                });
         });
 }
 
@@ -199,9 +304,9 @@ fn render_grid(
                 let fill = kg / MAX_WATER_KG;
                 sprite.color = Color::srgb(1.0 - fill, 1.0 - fill, 1.0);
             }
-            Cell::Object(w) if w == f32::MAX => {
+            Cell::Wall => {
                 sprite.image = Handle::default();
-                sprite.color = Color::srgb(0.1, 0.1, 0.1); // walls: near black
+                sprite.color = Color::srgb(0.1, 0.1, 0.1);
             }
             Cell::Object(w) => {
                 sprite.image = Handle::default();
@@ -213,16 +318,39 @@ fn render_grid(
     }
 }
 
+/// Maps t ∈ [0,1] through a five-stop rainbow: blue → cyan → green → yellow → red.
+/// Each stop occupies 25% of the range, giving much more perceptual contrast
+/// in the midtones than a single-hue white-to-red gradient.
+fn pressure_color(t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let (r, g, b) = if t < 0.25 {
+        let s = t / 0.25;
+        (0.0, s, 1.0) // blue → cyan
+    } else if t < 0.5 {
+        let s = (t - 0.25) / 0.25;
+        (0.0, 1.0, 1.0 - s) // cyan → green
+    } else if t < 0.75 {
+        let s = (t - 0.5) / 0.25;
+        (s, 1.0, 0.0) // green → yellow
+    } else {
+        let s = (t - 0.75) / 0.25;
+        (1.0, 1.0 - s, 0.0) // yellow → red
+    };
+    Color::srgb(r, g, b)
+}
+
 fn render_heat_grid(grid: Res<Grid>, mut query: Query<(&Tile, &mut Sprite)>) {
     let depth = build_depth_pressure(&grid);
-    // Use the inlet pressure as a fixed ceiling so the gradient doesn't collapse
-    // when accumulated column values exceed it.
-    let scale = MAX_WATER_KG * 3.0;
+    let max = depth.iter().cloned().fold(1.0f32, f32::max);
+
     for (tile, mut sprite) in &mut query {
-        let val = depth[tile.y * grid.width + tile.x].clamp(0.0, scale);
-        let pressure_percentage = (val + 1.0).ln() / (scale + 1.0).ln();
+        let val = depth[tile.y * grid.width + tile.x];
         sprite.image = Handle::default();
-        sprite.color = Color::srgb(1.0, 1.0 - pressure_percentage, 1.0 - pressure_percentage);
+        if val > 0.0 {
+            sprite.color = pressure_color(val / max);
+        } else {
+            sprite.color = WHITE.into();
+        }
     }
 }
 
@@ -253,27 +381,98 @@ fn update_button_colors(
     }
 }
 
+fn handle_inlet_toggle(
+    interaction_query: Query<&Interaction, (Changed<Interaction>, With<InletButton>)>,
+    mut state: ResMut<GameState>,
+) {
+    for interaction in &interaction_query {
+        if *interaction == Interaction::Pressed {
+            state.water_flow = !state.water_flow;
+        }
+    }
+}
+
+fn update_inlet_button(
+    mut query: Query<&mut BackgroundColor, With<InletButton>>,
+    state: Res<GameState>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+    for mut color in &mut query {
+        *color = if state.water_flow {
+            BackgroundColor(Color::srgb(0.1, 0.6, 0.2)) // green = ON
+        } else {
+            BackgroundColor(Color::srgb(0.4, 0.15, 0.15)) // dark red = OFF
+        };
+    }
+}
+
+fn handle_heatmap_toggle(
+    interaction_query: Query<&Interaction, (Changed<Interaction>, With<HeatmapButton>)>,
+    mut state: ResMut<GameState>,
+) {
+    for interaction in &interaction_query {
+        if *interaction == Interaction::Pressed {
+            state.show_pressure = !state.show_pressure;
+        }
+    }
+}
+
+fn update_heatmap_button(
+    mut query: Query<&mut BackgroundColor, With<HeatmapButton>>,
+    state: Res<GameState>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+    for mut color in &mut query {
+        *color = if state.show_pressure {
+            BackgroundColor(Color::srgb(0.2, 0.5, 0.8)) // blue = ON
+        } else {
+            BackgroundColor(Color::srgb(0.3, 0.3, 0.3)) // gray = OFF
+        };
+    }
+}
+
+fn handle_reset(
+    interaction_query: Query<&Interaction, (Changed<Interaction>, With<ResetButton>)>,
+    mut grid: ResMut<Grid>,
+    mut state: ResMut<GameState>,
+) {
+    for interaction in &interaction_query {
+        if *interaction == Interaction::Pressed {
+            *grid = Grid::init(grid.width, grid.height);
+            state.water_flow = false;
+        }
+    }
+}
+
 fn handle_input(
     mouse: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     window: Query<&Window>,
     mut grid: ResMut<Grid>,
     mut state: ResMut<GameState>,
-    selected: Res<SelectedWeight>,
+    mut selected: ResMut<SelectedWeight>,
+    config: Res<GridConfig>,
 ) {
     if mouse.pressed(MouseButton::Left) {
         if let Ok(window) = window.single() {
             if let Some(cursor_pos) = window.cursor_position() {
-                let world_x = cursor_pos.x - WINDOW_WIDTH / 2.0;
-                let world_y = -(cursor_pos.y - WINDOW_HEIGHT / 2.0);
+                let world_x = cursor_pos.x - config.window_width / 2.0;
+                let world_y = -(cursor_pos.y - config.window_height / 2.0);
                 // Ignore clicks inside the left toolbar
-                if world_x < -(WINDOW_WIDTH / 2.0) + PANEL_WIDTH {
+                if world_x < -(config.window_width / 2.0) + PANEL_WIDTH {
                     return;
                 }
                 let grid_x =
-                    ((world_x + WINDOW_WIDTH / 2.0 - PANEL_WIDTH) / TILE_SIZE) as usize;
-                let grid_y = ((world_y + WINDOW_HEIGHT / 2.0) / TILE_SIZE) as usize;
-                if grid_x < grid.width && grid_y < grid.height {
+                    ((world_x + config.window_width / 2.0 - PANEL_WIDTH) / TILE_SIZE) as usize;
+                let grid_y = ((world_y + config.window_height / 2.0) / TILE_SIZE) as usize;
+                if grid_x < grid.width
+                    && grid_y < grid.height
+                    && !matches!(grid.get_cell(grid_x, grid_y), Cell::Wall)
+                {
                     grid.set_cell(grid_x, grid_y, Cell::Object(selected.0));
                 }
             }
@@ -282,14 +481,14 @@ fn handle_input(
     if mouse.just_pressed(MouseButton::Right) {
         if let Ok(window) = window.single() {
             if let Some(cursor_pos) = window.cursor_position() {
-                let world_x = cursor_pos.x - WINDOW_WIDTH / 2.0;
-                let world_y = -(cursor_pos.y - WINDOW_HEIGHT / 2.0);
-                if world_x < -(WINDOW_WIDTH / 2.0) + PANEL_WIDTH {
+                let world_x = cursor_pos.x - config.window_width / 2.0;
+                let world_y = -(cursor_pos.y - config.window_height / 2.0);
+                if world_x < -(config.window_width / 2.0) + PANEL_WIDTH {
                     return;
                 }
                 let grid_x =
-                    ((world_x + WINDOW_WIDTH / 2.0 - PANEL_WIDTH) / TILE_SIZE) as usize;
-                let grid_y = ((world_y + WINDOW_HEIGHT / 2.0) / TILE_SIZE) as usize;
+                    ((world_x + config.window_width / 2.0 - PANEL_WIDTH) / TILE_SIZE) as usize;
+                let grid_y = ((world_y + config.window_height / 2.0) / TILE_SIZE) as usize;
                 if grid_x < grid.width && grid_y < grid.height {
                     println!(
                         "{grid_x}, {grid_y}: {:?} pressure: {}",
@@ -299,6 +498,18 @@ fn handle_input(
                 }
             }
         }
+    }
+    if keyboard.just_pressed(KeyCode::Digit1) {
+        selected.0 = 200.0;
+    }
+    if keyboard.just_pressed(KeyCode::Digit2) {
+        selected.0 = 500.0;
+    }
+    if keyboard.just_pressed(KeyCode::Digit3) {
+        selected.0 = 1000.0;
+    }
+    if keyboard.just_pressed(KeyCode::Digit4) {
+        selected.0 = 2000.0;
     }
     if keyboard.just_pressed(KeyCode::KeyX) {
         state.water_flow = !state.water_flow;
@@ -325,6 +536,7 @@ fn flow_water(mut grid: ResMut<Grid>, state: Res<GameState>) {
             Cell::Air => Cell::Water(flow_rate),
             Cell::Water(kg) => Cell::Water((kg + flow_rate).min(MAX_WATER_KG)),
             Cell::Object(weight) => Cell::Object(weight),
+            Cell::Wall => Cell::Wall,
         };
         grid.set_cell(x, 0, new_cell); // write
     }
@@ -446,6 +658,10 @@ fn build_depth_pressure(grid: &Grid) -> Vec<f32> {
                     depth[y * width + x] = (pressure - weight).max(0.0);
                     // don't push
                 }
+                Cell::Wall => {
+                    depth[y * width + x] = 0.0;
+                    // immovable — don't modify water_below
+                }
                 Cell::Air => {
                     water_below.clear();
                     depth[y * width + x] = 0.0;
@@ -475,7 +691,7 @@ fn step_objects(grid: &Grid) -> Vec<Cell> {
                 None => continue,
             };
 
-            // Horizontal pressure still uses fill level of the adjacent cell.
+            // Horizontal pressure: fill level difference of adjacent water cells.
             let p_left = if x > 0 {
                 water_pressure(&grid.cells[y * width + (x - 1)])
             } else {
@@ -486,34 +702,18 @@ fn step_objects(grid: &Grid) -> Vec<Cell> {
             } else {
                 0.0
             };
-            // Vertical pressure uses depth table — deeper water pushes harder.
-            let p_below = if y > 0 {
-                depth[(y - 1) * width + x]
-            } else {
-                0.0
-            };
-            let p_above = if y < height - 1 {
-                depth[(y + 1) * width + x]
-            } else {
-                0.0
-            };
-
-            // if the y force below is greater than 10% of the y force above, move up one
-
             let x_force = p_left - p_right;
-            let y_force = p_below - p_above;
+
+            // Vertical pressure: depth[idx] for objects is (raw_upward_pressure - weight).max(0.0).
+            // A positive value means buoyancy exceeds the object's weight — no need
+            // to compare against weight again.
+            let y_force = depth[idx];
 
             let threshold = 0.1;
-            // Only move along the dominant axis — whichever force is stronger.
-            // This prevents diagonal movement which causes conflicts when many
-            // objects move simultaneously.
-            let (dx, dy) = if y_force.abs() >= x_force.abs() {
-                let dy = if y_force.abs() > threshold {
-                    y_force.signum() as isize
-                } else {
-                    0
-                };
-                (0, dy)
+            // Only move along the dominant axis.
+            let (dx, dy) = if y_force >= x_force.abs() {
+                let dy = if y_force > threshold { 1isize } else { 0 };
+                (0isize, dy)
             } else {
                 let dx = if x_force.abs() > threshold {
                     x_force.signum() as isize
@@ -523,8 +723,7 @@ fn step_objects(grid: &Grid) -> Vec<Cell> {
                 (dx, 0)
             };
 
-            let force_kg = x_force.abs().max(y_force.abs());
-            let pushing_pressure = x_force.abs().max(y_force.abs());
+            let pushing_pressure = x_force.abs().max(y_force);
 
             let nx = x as isize + dx;
             let ny = y as isize + dy;
@@ -533,7 +732,13 @@ fn step_objects(grid: &Grid) -> Vec<Cell> {
             }
             let nidx = ny as usize * width + nx as usize;
 
-            if force_kg <= weight {
+            // Vertical: y_force already factors in weight (net buoyancy).
+            // Horizontal: x_force must still exceed weight.
+            if dy != 0 {
+                // buoyancy exceeds weight — move
+            } else if x_force.abs() <= weight {
+                continue;
+            } else if dx == 0 {
                 continue;
             }
 
@@ -577,6 +782,9 @@ fn step_objects(grid: &Grid) -> Vec<Cell> {
     let mut new_cells = grid.cells.clone();
     for &i in &sorted_winners {
         let intent = &intents[i];
+        if matches!(new_cells[intent.dst], Cell::Wall) {
+            continue; // walls are always impassable
+        }
         if matches!(new_cells[intent.dst], Cell::Object(_)) && !moved_srcs.contains(&intent.dst) {
             continue; // dst is occupied by an object that hasn't moved away yet
         }
@@ -687,16 +895,16 @@ mod tests {
         // Walls at x=0, x=4, y=0, y=4 — water at (2,2)
         let mut cells = vec![Cell::Air; 25];
         for x in 0..5 {
-            cells[0 * 5 + x] = Cell::Object(f32::MAX);
+            cells[0 * 5 + x] = Cell::Wall;
         }
         for x in 0..5 {
-            cells[4 * 5 + x] = Cell::Object(f32::MAX);
+            cells[4 * 5 + x] = Cell::Wall;
         }
         for y in 0..5 {
-            cells[y * 5 + 0] = Cell::Object(f32::MAX);
+            cells[y * 5 + 0] = Cell::Wall;
         }
         for y in 0..5 {
-            cells[y * 5 + 4] = Cell::Object(f32::MAX);
+            cells[y * 5 + 4] = Cell::Wall;
         }
         cells[2 * 5 + 2] = Cell::Water(MAX_WATER_KG);
 
