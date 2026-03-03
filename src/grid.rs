@@ -14,6 +14,8 @@ impl Plugin for GridPlugin {
                 simulate_flow,
                 render_grid,
                 handle_input,
+                handle_weight_buttons,
+                update_button_colors,
             ),
         );
     }
@@ -22,7 +24,8 @@ impl Plugin for GridPlugin {
 const TILE_SIZE: f32 = 16.0;
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
-const OFFSET_X: f32 = -(WINDOW_WIDTH / 2.0) + (TILE_SIZE / 2.0);
+const PANEL_WIDTH: f32 = 110.0;
+const OFFSET_X: f32 = -(WINDOW_WIDTH / 2.0) + PANEL_WIDTH + (TILE_SIZE / 2.0);
 const OFFSET_Y: f32 = -(WINDOW_HEIGHT / 2.0) + (TILE_SIZE / 2.0);
 const MAX_WATER_KG: f32 = 1000.0;
 
@@ -45,6 +48,12 @@ struct GameState {
     water_flow: bool,
     show_pressure: bool,
 }
+
+#[derive(Resource)]
+struct SelectedWeight(f32);
+
+#[derive(Component)]
+struct WeightButton(f32);
 
 impl Grid {
     fn init(width: usize, height: usize) -> Grid {
@@ -83,7 +92,7 @@ struct Tile {
 }
 
 fn setup(mut commands: Commands) {
-    let width = (WINDOW_WIDTH / TILE_SIZE) as usize;
+    let width = ((WINDOW_WIDTH - PANEL_WIDTH) / TILE_SIZE) as usize;
     let height = (WINDOW_HEIGHT / TILE_SIZE) as usize;
 
     commands.spawn(Camera2d);
@@ -91,7 +100,9 @@ fn setup(mut commands: Commands) {
         water_flow: false,
         show_pressure: false,
     });
+    commands.insert_resource(SelectedWeight(200.0));
     commands.insert_resource(Grid::init(width, height));
+
     for row in 0..height {
         for col in 0..width {
             commands.spawn((
@@ -111,6 +122,56 @@ fn setup(mut commands: Commands) {
             ));
         }
     }
+
+    // Left toolbar with weight selection buttons
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(0.0),
+                left: Val::Px(0.0),
+                width: Val::Px(PANEL_WIDTH),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                padding: UiRect::top(Val::Px(16.0)),
+                row_gap: Val::Px(10.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.1, 0.18, 0.38)),
+        ))
+        .with_children(|parent| {
+            for &weight in &[200.0f32, 500.0, 1000.0] {
+                let is_selected = weight == 200.0;
+                parent
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Px(90.0),
+                            height: Val::Px(40.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(if is_selected {
+                            Color::srgb(0.2, 0.5, 0.8)
+                        } else {
+                            Color::srgb(0.3, 0.3, 0.3)
+                        }),
+                        WeightButton(weight),
+                    ))
+                    .with_children(|btn| {
+                        btn.spawn((
+                            Text::new(format!("{} kg", weight as u32)),
+                            TextFont {
+                                font_size: 18.0,
+                                ..default()
+                            },
+                            TextColor(Color::WHITE),
+                        ));
+                    });
+            }
+        });
 }
 
 fn render_grid(
@@ -138,9 +199,15 @@ fn render_grid(
                 let fill = kg / MAX_WATER_KG;
                 sprite.color = Color::srgb(1.0 - fill, 1.0 - fill, 1.0);
             }
-            Cell::Object(_) => {
+            Cell::Object(w) if w == f32::MAX => {
                 sprite.image = Handle::default();
-                sprite.color = GRAY.into();
+                sprite.color = Color::srgb(0.1, 0.1, 0.1); // walls: near black
+            }
+            Cell::Object(w) => {
+                sprite.image = Handle::default();
+                // Heavier = darker: 200kg → ~0.86, 500kg → ~0.65, 1000kg → ~0.30
+                let brightness = 1.0 - (w / 1000.0).clamp(0.0, 1.0) * 0.7;
+                sprite.color = Color::srgb(brightness, brightness, brightness);
             }
         }
     }
@@ -148,13 +215,41 @@ fn render_grid(
 
 fn render_heat_grid(grid: Res<Grid>, mut query: Query<(&Tile, &mut Sprite)>) {
     let depth = build_depth_pressure(&grid);
-    let max = depth.iter().cloned().fold(1.0f32, f32::max);
+    // Use the inlet pressure as a fixed ceiling so the gradient doesn't collapse
+    // when accumulated column values exceed it.
+    let scale = MAX_WATER_KG * 3.0;
     for (tile, mut sprite) in &mut query {
-        let pressure_percentage =
-            (depth[tile.y * grid.width + tile.x] + 1.0).ln() / (max + 1.0).ln();
-        //println!("{}:{}, {pressure_percentage}", tile.y, tile.x);
+        let val = depth[tile.y * grid.width + tile.x].clamp(0.0, scale);
+        let pressure_percentage = (val + 1.0).ln() / (scale + 1.0).ln();
         sprite.image = Handle::default();
         sprite.color = Color::srgb(1.0, 1.0 - pressure_percentage, 1.0 - pressure_percentage);
+    }
+}
+
+fn handle_weight_buttons(
+    interaction_query: Query<(&Interaction, &WeightButton), Changed<Interaction>>,
+    mut selected: ResMut<SelectedWeight>,
+) {
+    for (interaction, weight_btn) in &interaction_query {
+        if *interaction == Interaction::Pressed {
+            selected.0 = weight_btn.0;
+        }
+    }
+}
+
+fn update_button_colors(
+    mut query: Query<(&WeightButton, &mut BackgroundColor)>,
+    selected: Res<SelectedWeight>,
+) {
+    if !selected.is_changed() {
+        return;
+    }
+    for (btn, mut color) in &mut query {
+        *color = if btn.0 == selected.0 {
+            BackgroundColor(Color::srgb(0.2, 0.5, 0.8))
+        } else {
+            BackgroundColor(Color::srgb(0.3, 0.3, 0.3))
+        };
     }
 }
 
@@ -164,15 +259,23 @@ fn handle_input(
     window: Query<&Window>,
     mut grid: ResMut<Grid>,
     mut state: ResMut<GameState>,
+    selected: Res<SelectedWeight>,
 ) {
     if mouse.pressed(MouseButton::Left) {
         if let Ok(window) = window.single() {
             if let Some(cursor_pos) = window.cursor_position() {
                 let world_x = cursor_pos.x - WINDOW_WIDTH / 2.0;
                 let world_y = -(cursor_pos.y - WINDOW_HEIGHT / 2.0);
-                let grid_x = ((world_x + WINDOW_WIDTH / 2.0) / TILE_SIZE) as usize;
+                // Ignore clicks inside the left toolbar
+                if world_x < -(WINDOW_WIDTH / 2.0) + PANEL_WIDTH {
+                    return;
+                }
+                let grid_x =
+                    ((world_x + WINDOW_WIDTH / 2.0 - PANEL_WIDTH) / TILE_SIZE) as usize;
                 let grid_y = ((world_y + WINDOW_HEIGHT / 2.0) / TILE_SIZE) as usize;
-                grid.set_cell(grid_x, grid_y, Cell::Object(500.0));
+                if grid_x < grid.width && grid_y < grid.height {
+                    grid.set_cell(grid_x, grid_y, Cell::Object(selected.0));
+                }
             }
         }
     }
@@ -181,13 +284,19 @@ fn handle_input(
             if let Some(cursor_pos) = window.cursor_position() {
                 let world_x = cursor_pos.x - WINDOW_WIDTH / 2.0;
                 let world_y = -(cursor_pos.y - WINDOW_HEIGHT / 2.0);
-                let grid_x = ((world_x + WINDOW_WIDTH / 2.0) / TILE_SIZE) as usize;
+                if world_x < -(WINDOW_WIDTH / 2.0) + PANEL_WIDTH {
+                    return;
+                }
+                let grid_x =
+                    ((world_x + WINDOW_WIDTH / 2.0 - PANEL_WIDTH) / TILE_SIZE) as usize;
                 let grid_y = ((world_y + WINDOW_HEIGHT / 2.0) / TILE_SIZE) as usize;
-                println!(
-                    "{grid_x}, {grid_y}: {:?} pressure: {}",
-                    *grid.get_cell(grid_x, grid_y),
-                    build_depth_pressure(&grid)[grid_y * grid.width + grid_x]
-                );
+                if grid_x < grid.width && grid_y < grid.height {
+                    println!(
+                        "{grid_x}, {grid_y}: {:?} pressure: {}",
+                        *grid.get_cell(grid_x, grid_y),
+                        build_depth_pressure(&grid)[grid_y * grid.width + grid_x]
+                    );
+                }
             }
         }
     }

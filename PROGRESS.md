@@ -95,15 +95,39 @@ src/
   textures.rs  — TexturesPlugin, TextureAssets resource, make_froth_frame()
 ```
 
+### Session 7
+- **`PANEL_HEIGHT` constant** — reserves pixel space at bottom of window for UI; `OFFSET_Y` shifted up by `PANEL_HEIGHT` so the grid doesn't overlap the panel
+- **Grid height shrinkage** — `height = (WINDOW_HEIGHT - PANEL_HEIGHT) / TILE_SIZE`; grid area is now 540px tall (33 tiles) instead of 600px (37 tiles)
+- **Bevy UI nodes** — `Node { position_type: PositionType::Absolute, bottom: Val::Px(0.0), ... }` for absolute panel placement
+- **`Button` component** — marks an entity as a UI button; Bevy automatically adds `Interaction` and tracks Hover/Pressed/None states
+- **`Changed<Interaction>` filter** — `Query<..., Changed<Interaction>>` only runs the system on entities whose interaction state changed this frame; efficient for button handling
+- **`SelectedWeight` resource** — holds the currently chosen object weight (200/500/1000 kg); updated by `handle_weight_buttons`
+- **`WeightButton(f32)` component** — data component on each button entity storing its associated weight value
+- **`selected.is_changed()`** — skips `update_button_colors` entirely when the selection hasn't changed; avoids redundant work each frame
+- **Panel click guard** — `handle_input` returns early if `world_y < -(WINDOW_HEIGHT/2) + PANEL_HEIGHT` so clicking buttons doesn't accidentally place objects
+- **Right-click bounds check** — added `grid_x < grid.width && grid_y < grid.height` guard to right-click debug path (was missing before)
+
+## What Was Built
+- `Cell::Water(f32)` fill level with color gradient rendering
+- Border walls on left, right, and top edges using `Object(9999.0)`
+- `flow_water` system — fills bottom row each tick when enabled
+- `simulate_flow` system — pressure-based diffusion using delta buffer; water spreads in all four directions equally
+- `GameState` resource — `X` key toggles water flow, `R` key resets grid
+- `step_simulation` pure function — simulation logic extracted from Bevy system for testability
+- `step_objects` pure function — moves objects based on water pressure; 3-pass MoveIntent with random conflict resolution
+- `build_depth_pressure` pure function — computes per-column cumulative depth pressure table; y=0 hardcoded to 2000.0
+- `src/textures.rs` — `TexturesPlugin`, `TextureAssets` resource, programmatic froth texture
+- Froth rendering — low fill water cells show a speckled white/blue texture
+- Right-click cell inspector — prints cell type and value to console
+- **Bottom UI panel** — dark bar with 200 kg / 500 kg / 1000 kg buttons; selected button highlighted in blue
+- **`SelectedWeight` resource** — tracks active weight; `handle_input` uses it when placing objects
+
 ## Where We Left Off
-`hold_the_line` test failing. Objects in a horizontal row at y=2 with water at y=0 and y=1 do not move upward.
+UI panel with weight selection is working. Grid shrunk by PANEL_HEIGHT to make room.
 
-**Root cause identified:** `build_depth_pressure` accumulates water *above* each cell scanning top-down. Water at y=1 contributes 0 depth pressure to itself — it only contributes to cells below it (y=0). So `p_below` for objects at y=2 reads `depth[y=1] = 0.0`, producing zero force.
-
-This is a design flaw: depth pressure doesn't include the cell's own water contribution, only cells above it. The ocean floor constant (2000.0 at y=0) papers over this for the bottom row, but fails for objects higher up.
+`hold_the_line` test still failing (pre-existing issue from Session 6).
 
 ## What Comes Next
 - **Fix `build_depth_pressure`** — include the cell's own fill in its depth value, or rethink the pressure model so water directly below an object contributes to upward force
 - **`hold_the_line` test should pass** after the fix
-- **Remove `println!` in winners loop** — debug print left in from this session
 - **`pressure` field on `MoveIntent`** — still unused, dead code warning pending
