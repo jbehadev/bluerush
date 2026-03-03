@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.18"
+rand = "0.8"
 
 # Enable optimizations for dependencies in debug builds (keeps game fast while iterating)
 [profile.dev.package."*"]

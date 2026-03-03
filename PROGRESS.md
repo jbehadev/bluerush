@@ -40,6 +40,39 @@ A flood simulation game where water rushes in and carries/destroys objects in it
 - **`.clamp(min, max)`** — clamps a value to a range, equivalent to `.max(min).min(max)`
 - **Water conservation** — a simulation bug where multiple cells writing to the same neighbor created water; caught by a unit test
 
+### Session 4
+- **`.just_pressed()` vs `.pressed()`** — `pressed` fires every frame the key is held; `just_pressed` fires only on the first frame
+- **`#[derive(Debug)]`** — enables `{:?}` formatting for custom types; needed for `println!` debugging
+- **`get_cell` helper** — added to `Grid` impl for read-only cell access
+- **Right-click debug tooltip** — `mouse.just_pressed(MouseButton::Right)` to inspect cell state via `println!`
+- **Pressure-based object movement** — `step_objects` function uses water pressure differences to push objects
+- **MoveIntent pattern** — collect all intended moves first (Pass 1), detect conflicts (Pass 2), apply conflict-free moves (Pass 3)
+- **Swap bug** — when object A moves to B's src cell while B moves away, A gets overwritten; fixed with `dst_counts[intent.src] > 0` check
+- **`HashSet<usize>`** — considered but not needed; `dst_counts` vec was sufficient for conflict detection
+- **Object-water swap** — vacated cell gets the water that was at the destination (`grid.cells[intent.dst].clone()`), conserving water mass
+- **Threshold-based direction** — `x_force.abs() > threshold` decides if force is strong enough to trigger movement on each axis independently
+- **force_kg vs weight** — `force_kg = pressure_diff * 1000.0`; object only moves if `force_kg > weight`
+
+### Session 5
+- **Depth-based pressure** — `build_depth_pressure` scans each column top-down, accumulating water fill levels; cells deeper in the column get higher pressure values
+- **Ocean floor base pressure** — `y=0` is hardcoded to `2000.0` representing infinite water pressure behind the bottom row; this ensures objects near the floor are always pushed upward
+- **Why fill-level pressure fails in full grids** — when water equalises everywhere (all cells ~0.95 fill), pressure differences between neighbors approach zero; depth pressure avoids this by encoding column height, not just local fill
+- **Test layout matters** — tests for depth pressure must be aware that depth accumulates from above; a single water cell at y=0 has depth=0 (nothing above it)
+- **Dead code warnings** — unused struct fields trigger `#[warn(dead_code)]`
+
+### Session 6
+- **`src/textures.rs` module** — new file with `TexturesPlugin` and `TextureAssets` resource holding `Handle<Image>` fields
+- **Programmatic textures** — `Image::new(Extent3d, TextureDimension::D2, Vec<u8>, TextureFormat, RenderAssetUsages)` creates a texture from raw RGBA bytes at startup
+- **`sprite.image` vs `sprite.color`** — image sets the texture; color is a tint on top; `Handle::default()` clears the texture back to a plain color rectangle
+- **`assets.add(image)`** — inserts an `Image` into Bevy's asset storage, returns a `Handle<Image>`
+- **`rand` crate** — added as dependency; `rand::thread_rng()` + `rng.r#gen::<f32>()` for random values
+- **`r#gen` raw identifier** — `gen` became a reserved keyword in Rust 2024 edition; `r#gen` escapes it to use the `rand 0.8` method
+- **`crate::textures::TextureAssets`** — cross-module import; modules can't see each other without explicit `use` paths
+- **Froth rendering** — low fill water (`fill < 0.1`) uses a programmatic speckled texture; higher fill uses color gradient
+- **`HashMap<usize, Vec<usize>>`** — used in Pass 2 of MoveIntent to group intents by destination
+- **Random conflict resolution** — when multiple objects want the same cell, one is chosen randomly via `candidates[rng.r#gen::<usize>() % candidates.len()]`
+- **`HashSet<usize>` for winners** — tracks which intent indices won; used to skip moves whose src is another winner's dst
+
 ## What Was Built
 - `Cell::Water(f32)` fill level with color gradient rendering
 - Border walls on left, right, and top edges using `Object(9999.0)`
@@ -47,19 +80,30 @@ A flood simulation game where water rushes in and carries/destroys objects in it
 - `simulate_flow` system — pressure-based diffusion using delta buffer; water spreads in all four directions equally
 - `GameState` resource — `X` key toggles water flow, `R` key resets grid
 - `step_simulation` pure function — simulation logic extracted from Bevy system for testability
-- Two unit tests: spread detection and water conservation check
+- `step_objects` pure function — moves objects based on water pressure; 3-pass MoveIntent with random conflict resolution
+- `build_depth_pressure` pure function — computes per-column cumulative depth pressure table; y=0 hardcoded to 2000.0
+- `src/textures.rs` — `TexturesPlugin`, `TextureAssets` resource, programmatic froth texture
+- Froth rendering — low fill water cells show a speckled white/blue texture
+- Right-click cell inspector — prints cell type and value to console
+- Six unit tests (5 passing, 1 failing — see below)
 
 ## Current File Structure
 ```
 src/
-  main.rs   — app setup, registers GridPlugin
-  grid.rs   — GridPlugin, Cell/Grid/Tile/GameState types, all systems and simulation logic
+  main.rs      — app setup, registers TexturesPlugin + GridPlugin
+  grid.rs      — GridPlugin, Cell/Grid/Tile/GameState types, all systems and simulation logic
+  textures.rs  — TexturesPlugin, TextureAssets resource, make_froth_frame()
 ```
 
 ## Where We Left Off
-Water simulation working — fills from bottom inlet, spreads with pressure gradient showing as color (deep blue = full, light blue = partial). Objects placed by mouse act as barriers. Delta buffer ensures water is conserved across ticks.
+`hold_the_line` test failing. Objects in a horizontal row at y=2 with water at y=0 and y=1 do not move upward.
+
+**Root cause identified:** `build_depth_pressure` accumulates water *above* each cell scanning top-down. Water at y=1 contributes 0 depth pressure to itself — it only contributes to cells below it (y=0). So `p_below` for objects at y=2 reads `depth[y=1] = 0.0`, producing zero force.
+
+This is a design flaw: depth pressure doesn't include the cell's own water contribution, only cells above it. The ocean floor constant (2000.0 at y=0) papers over this for the bottom row, but fails for objects higher up.
 
 ## What Comes Next
-- Gravity bias — make downward transfer stronger so water pools at bottom naturally
-- Froth rendering — low fill levels render with a foamy/white color
-- Object interaction — light objects pushed by water pressure, heavy ones immovable
+- **Fix `build_depth_pressure`** — include the cell's own fill in its depth value, or rethink the pressure model so water directly below an object contributes to upward force
+- **`hold_the_line` test should pass** after the fix
+- **Remove `println!` in winners loop** — debug print left in from this session
+- **`pressure` field on `MoveIntent`** — still unused, dead code warning pending

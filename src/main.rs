@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 
 use crate::grid::GridPlugin;
+use crate::textures::TexturesPlugin;
 mod grid;
+mod textures;
 
 fn main() {
     App::new()
@@ -12,6 +14,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(TexturesPlugin)
         .add_plugins(GridPlugin)
         .run();
 }
