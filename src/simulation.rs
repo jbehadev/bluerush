@@ -39,7 +39,10 @@ impl Grid {
             }
         }
 
-        grid.set_cell((width / 2) - 1, 0, Cell::Water(MAX_WATER_KG * 0.5));
+        // Pre-fill y=0 as the reservoir — the gate at y=1 controls flow into the simulation.
+        for x in 1..width - 1 {
+            grid.set_cell(x, 0, Cell::Water(MAX_WATER_KG));
+        }
 
         grid
     }
@@ -202,14 +205,21 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
                 None => continue,
             };
 
-            // Horizontal pressure: fill level difference of adjacent water cells.
+            // Horizontal pressure: use depth[] from adjacent water cells,
+            // consistent with the vertical buoyancy calculation.
             let p_left = if x > 0 {
-                water_pressure(&grid.cells[y * width + (x - 1)])
+                match &grid.cells[y * width + (x - 1)] {
+                    Cell::Water(_) => depth[y * width + (x - 1)],
+                    _ => 0.0,
+                }
             } else {
                 0.0
             };
             let p_right = if x < width - 1 {
-                water_pressure(&grid.cells[y * width + (x + 1)])
+                match &grid.cells[y * width + (x + 1)] {
+                    Cell::Water(_) => depth[y * width + (x + 1)],
+                    _ => 0.0,
+                }
             } else {
                 0.0
             };
@@ -220,21 +230,23 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
             // to compare against weight again.
             let y_force = depth[idx];
 
+            // Both net forces are now comparable: y_force already has weight subtracted
+            // (via depth[]), so subtract weight from x_force the same way.
+            let net_x = (x_force.abs() - weight).max(0.0);
+            let net_y = y_force;
+
             let threshold = 0.1;
-            // Only move along the dominant axis.
-            let (dx, dy) = if y_force >= x_force.abs() {
-                let dy = if y_force > threshold { 1isize } else { 0 };
-                (0isize, dy)
+            let (dx, dy) = if net_y >= net_x {
+                (0isize, if net_y > threshold { 1isize } else { 0 })
             } else {
-                let dx = if x_force.abs() > threshold {
-                    x_force.signum() as isize
-                } else {
-                    0
-                };
-                (dx, 0)
+                (if net_x > threshold { x_force.signum() as isize } else { 0 }, 0isize)
             };
 
-            let pushing_pressure = x_force.abs().max(y_force);
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+
+            let pushing_pressure = net_x.max(net_y);
 
             let nx = x as isize + dx;
             let ny = y as isize + dy;
@@ -242,16 +254,6 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
                 continue;
             }
             let nidx = ny as usize * width + nx as usize;
-
-            // Vertical: y_force already factors in weight (net buoyancy).
-            // Horizontal: x_force must still exceed weight.
-            if dy != 0 {
-                // buoyancy exceeds weight — move
-            } else if x_force.abs() <= weight {
-                continue;
-            } else if dx == 0 {
-                continue;
-            }
 
             intents.push(MoveIntent {
                 src: idx,
