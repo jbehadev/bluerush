@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::grid::{GridConfig, GridPlugin};
 use crate::textures::TexturesPlugin;
 mod grid;
+mod persistence;
 mod simulation;
 mod textures;
 

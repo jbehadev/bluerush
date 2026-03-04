@@ -1,13 +1,15 @@
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 pub const MAX_WATER_KG: f32 = 1000.0;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Cell {
     Air,
     Water(f32),
     Object(f32),
     Wall,
+    Spring, // fixed water source; always holds MAX_WATER_KG
 }
 
 pub struct Grid {
@@ -59,6 +61,7 @@ impl Grid {
 fn water_fill(cell: &Cell) -> Option<f32> {
     match cell {
         Cell::Water(f) => Some(*f),
+        Cell::Spring => Some(MAX_WATER_KG),
         _ => None,
     }
 }
@@ -122,6 +125,13 @@ pub fn step_simulation(grid: &Grid) -> Vec<Cell> {
         };
     }
 
+    // Preserve spring cells — they are permanent, self-replenishing sources
+    for i in 0..new_cells.len() {
+        if matches!(grid.cells[i], Cell::Spring) {
+            new_cells[i] = Cell::Spring;
+        }
+    }
+
     new_cells
 }
 
@@ -142,10 +152,11 @@ fn object_weight(cell: &Cell) -> Option<f32> {
 // Represents an object's intention to move this tick.
 #[derive(Debug)]
 struct MoveIntent {
-    src: usize,    // index of the object's current cell
-    dst: usize,    // index of the cell it wants to move into
-    weight: f32,   // the object's weight
-    pressure: f32, // pressure from the pushing side (fills the vacated cell)
+    src: usize,                // index of the object's current cell
+    dst: usize,                // index of the cell it wants to move into
+    weight: f32,               // the object's weight
+    pressure: f32,             // pressure from the pushing side
+    fallback_dst: Option<usize>, // secondary direction to try if primary is blocked
 }
 
 pub fn build_depth_pressure(grid: &Grid) -> Vec<f32> {
@@ -171,6 +182,10 @@ pub fn build_depth_pressure(grid: &Grid) -> Vec<f32> {
                 Cell::Object(weight) => {
                     depth[y * width + x] = (pressure - weight).max(0.0);
                     // don't push
+                }
+                Cell::Spring => {
+                    depth[y * width + x] = pressure;
+                    water_below.push((MAX_WATER_KG, y));
                 }
                 Cell::Wall => {
                     depth[y * width + x] = 0.0;
@@ -255,11 +270,41 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
             }
             let nidx = ny as usize * width + nx as usize;
 
+            // Fallback direction: if the primary move is blocked, try the secondary axis.
+            // - Primary UP → try horizontal (x_force direction, or column parity if symmetric)
+            // - Primary LEFT/RIGHT → try UP if there is buoyancy
+            let fallback_dst = if dy != 0 {
+                // Primary is vertical; fall back to horizontal.
+                let fb_dx: isize = if x_force > threshold {
+                    1
+                } else if x_force < -threshold {
+                    -1
+                } else {
+                    // No clear horizontal preference — alternate by column so a wide
+                    // block doesn't all pile to one side.
+                    if x % 2 == 0 { -1 } else { 1 }
+                };
+                let fb_nx = x as isize + fb_dx;
+                if fb_nx >= 0 && fb_nx < width as isize {
+                    Some(y * width + fb_nx as usize)
+                } else {
+                    None
+                }
+            } else {
+                // Primary is horizontal; fall back to up if buoyancy is present.
+                if net_y > threshold && y + 1 < height {
+                    Some((y + 1) * width + x)
+                } else {
+                    None
+                }
+            };
+
             intents.push(MoveIntent {
                 src: idx,
                 dst: nidx,
                 weight,
                 pressure: pushing_pressure,
+                fallback_dst,
             });
         }
     }
@@ -290,16 +335,28 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
     let mut new_cells = grid.cells.clone();
     for &i in &sorted_winners {
         let intent = &intents[i];
-        if matches!(new_cells[intent.dst], Cell::Wall) {
-            continue; // walls are always impassable
+
+        // Helper: returns true if the cell at `idx` blocks entry.
+        let is_blocked = |idx: usize| -> bool {
+            matches!(new_cells[idx], Cell::Wall | Cell::Spring)
+                || (matches!(new_cells[idx], Cell::Object(_)) && !moved_srcs.contains(&idx))
+        };
+
+        // Try primary direction first; fall back to secondary if blocked.
+        let effective_dst = if !is_blocked(intent.dst) {
+            Some(intent.dst)
+        } else if let Some(fb) = intent.fallback_dst {
+            if !is_blocked(fb) { Some(fb) } else { None }
+        } else {
+            None
+        };
+
+        if let Some(dst) = effective_dst {
+            let vacated = new_cells[dst].clone();
+            new_cells[dst] = Cell::Object(intent.weight);
+            new_cells[intent.src] = vacated;
+            moved_srcs.insert(intent.src);
         }
-        if matches!(new_cells[intent.dst], Cell::Object(_)) && !moved_srcs.contains(&intent.dst) {
-            continue; // dst is occupied by an object that hasn't moved away yet
-        }
-        let vacated = new_cells[intent.dst].clone();
-        new_cells[intent.dst] = Cell::Object(intent.weight);
-        new_cells[intent.src] = vacated;
-        moved_srcs.insert(intent.src);
     }
 
     new_cells
@@ -459,6 +516,108 @@ mod tests {
             .filter(|c| matches!(c, Cell::Object(_)))
             .count();
         assert_eq!(object_count, 3, "Should still have exactly 3 objects");
+    }
+
+    #[test]
+    fn sandwiched_objects_float() {
+        // Simulates the user's reported scenario:
+        // A column of 2 objects with water BOTH below and above them.
+        //
+        //   y=4: [Air, Air, Air]
+        //   y=3: [Air, Water, Air]  ← water ABOVE
+        //   y=2: [Air, Object, Air] ← top object
+        //   y=1: [Air, Object, Air] ← bottom object
+        //   y=0: [Air, Water, Air]  ← water BELOW
+        let mut cells = vec![Cell::Air; 5 * 3];
+        cells[0 * 3 + 1] = Cell::Water(MAX_WATER_KG); // y=0 water below
+        cells[1 * 3 + 1] = Cell::Object(200.0);        // y=1 bottom object
+        cells[2 * 3 + 1] = Cell::Object(200.0);        // y=2 top object
+        cells[3 * 3 + 1] = Cell::Water(MAX_WATER_KG); // y=3 water above
+        let grid = make_grid(3, 5, cells);
+
+        let depth = super::build_depth_pressure(&grid);
+        println!("depth y=0 (water): {:.2}", depth[0 * 3 + 1]);
+        println!("depth y=1 (object): {:.2}", depth[1 * 3 + 1]);
+        println!("depth y=2 (object): {:.2}", depth[2 * 3 + 1]);
+        println!("depth y=3 (water): {:.2}", depth[3 * 3 + 1]);
+
+        let result = step_objects(&grid);
+        println!("result y=0: {:?}", result[0 * 3 + 1]);
+        println!("result y=1: {:?}", result[1 * 3 + 1]);
+        println!("result y=2: {:?}", result[2 * 3 + 1]);
+        println!("result y=3: {:?}", result[3 * 3 + 1]);
+        println!("result y=4: {:?}", result[4 * 3 + 1]);
+
+        // Both objects should have moved up by 1
+        assert!(
+            matches!(result[2 * 3 + 1], Cell::Object(_)),
+            "Bottom object should be at y=2"
+        );
+        assert!(
+            matches!(result[3 * 3 + 1], Cell::Object(_)),
+            "Top object should be at y=3"
+        );
+        assert!(
+            !matches!(result[1 * 3 + 1], Cell::Object(_)),
+            "y=1 should no longer have an object"
+        );
+    }
+
+    #[test]
+    fn blocked_upward_slips_sideways() {
+        // A column of objects pressed against the ceiling.
+        // Primary direction (UP) is blocked by the Wall at y=4.
+        // The fallback should slip the top object sideways, freeing the chain.
+        //
+        //   y=4: [Wall, Wall, Wall]  ← ceiling
+        //   y=3: [Air,  Obj,  Air]   ← top object — UP blocked, fallback RIGHT (x=1 is odd)
+        //   y=2: [Air,  Obj,  Air]
+        //   y=1: [Air,  Obj,  Air]
+        //   y=0: [Air,  Water, Air]  ← water provides upward pressure
+        //
+        // With NO fallback (old behaviour): nothing can move — top is stuck against ceiling,
+        // each object below is blocked by the unmoved one above.
+        //
+        // With fallback: (1,3) slips RIGHT to (2,3); (1,2) moves up to (1,3); (1,1) to (1,2).
+        let mut cells = vec![Cell::Air; 5 * 3];
+        // Ceiling
+        cells[4 * 3 + 0] = Cell::Wall;
+        cells[4 * 3 + 1] = Cell::Wall;
+        cells[4 * 3 + 2] = Cell::Wall;
+        // Column of objects
+        cells[3 * 3 + 1] = Cell::Object(200.0); // (1,3)
+        cells[2 * 3 + 1] = Cell::Object(200.0); // (1,2)
+        cells[1 * 3 + 1] = Cell::Object(200.0); // (1,1)
+        // Water below
+        cells[0 * 3 + 1] = Cell::Water(MAX_WATER_KG); // (1,0)
+        let grid = make_grid(3, 5, cells);
+
+        let result = step_objects(&grid);
+
+        assert_eq!(
+            result.iter().filter(|c| matches!(c, Cell::Object(_))).count(),
+            3,
+            "Object count must be preserved"
+        );
+        // Top object must have slipped right to (2,3)
+        assert!(
+            matches!(result[3 * 3 + 2], Cell::Object(_)),
+            "Top object should have slipped sideways to (2,3)"
+        );
+        // Chain below should have shifted up: (1,2) and (1,3) now hold the lower two objects
+        assert!(
+            matches!(result[3 * 3 + 1], Cell::Object(_)),
+            "Object from y=2 should now be at (1,3)"
+        );
+        assert!(
+            matches!(result[2 * 3 + 1], Cell::Object(_)),
+            "Object from y=1 should now be at (1,2)"
+        );
+        // Bottom slot should be vacated
+        assert!(
+            !matches!(result[1 * 3 + 1], Cell::Object(_)),
+            "(1,1) should be vacated after chain shifts up"
+        );
     }
 
     #[test]

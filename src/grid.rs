@@ -1,3 +1,4 @@
+use crate::persistence;
 use crate::simulation::{
     Cell, Grid, MAX_WATER_KG, build_depth_pressure, step_objects, step_simulation,
 };
@@ -5,34 +6,51 @@ use crate::textures::TextureAssets;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::{color::palettes::css::*, prelude::*};
 
+#[derive(Message)]
+struct SaveRequested;
+
+#[derive(Message)]
+struct LoadRequested;
+
 pub struct GridPlugin;
 
 impl Plugin for GridPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
+            .add_message::<SaveRequested>()
+            .add_message::<LoadRequested>()
+            .init_resource::<PendingFileOp>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
                 (
-                    simulate_objects,
-                    flow_water,
-                    simulate_flow,
-                    render_grid,
-                    handle_input,
-                    handle_weight_buttons,
-                    handle_eraser_button,
-                    update_tool_buttons,
-                    handle_inlet_toggle,
-                    update_inlet_button,
-                    handle_heatmap_toggle,
-                    update_heatmap_button,
-                    handle_reset,
-                    animate_gate,
-                    handle_speed_buttons,
-                    update_speed_label,
-                    handle_brush_buttons,
-                    update_brush_label,
-                    update_status,
+                    (
+                        simulate_objects,
+                        flow_water,
+                        simulate_flow,
+                        render_grid,
+                        handle_input,
+                        handle_weight_buttons,
+                        handle_eraser_button,
+                        handle_spring_button,
+                        update_tool_buttons,
+                        handle_inlet_toggle,
+                        update_inlet_button,
+                        handle_heatmap_toggle,
+                    ),
+                    (
+                        update_heatmap_button,
+                        handle_reset,
+                        animate_gate,
+                        handle_speed_buttons,
+                        update_speed_label,
+                        handle_brush_buttons,
+                        update_brush_label,
+                        update_status,
+                        handle_save,
+                        handle_load,
+                        poll_file_op,
+                    ),
                 ),
             );
     }
@@ -72,6 +90,7 @@ struct GameState {
 enum SelectedTool {
     Block(f32),
     Eraser,
+    Spring,
 }
 
 #[derive(Component)]
@@ -79,6 +98,9 @@ struct WeightButton(f32);
 
 #[derive(Component)]
 struct EraserButton;
+
+#[derive(Component)]
+struct SpringButton;
 
 #[derive(Component)]
 struct InletButton;
@@ -109,6 +131,11 @@ struct BrushUpButton;
 
 #[derive(Component)]
 struct BrushLabel;
+
+#[derive(Resource, Default)]
+struct PendingFileOp {
+    op: Option<persistence::PendingIo>,
+}
 
 #[derive(Component)]
 struct Tile {
@@ -287,6 +314,46 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                         });
                         btn.spawn((
                             Text::new("Erase"),
+                            TextFont { font_size: 9.0, ..default() },
+                            TextColor(Color::WHITE),
+                        ));
+                    });
+
+                    // Spring tool button
+                    grid.spawn((
+                        Button,
+                        Node {
+                            width: Val::Px(50.0),
+                            height: Val::Px(56.0),
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::FlexEnd,
+                            padding: UiRect::bottom(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.55, 0.55, 0.58)),
+                        SpringButton,
+                    ))
+                    .with_children(|btn| {
+                        btn.spawn((Node {
+                            width: Val::Px(50.0),
+                            height: Val::Px(38.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },))
+                        .with_children(|icon| {
+                            icon.spawn((
+                                Node {
+                                    width: Val::Px(14.0),
+                                    height: Val::Px(14.0),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgb(0.0, 0.8, 0.7)),
+                            ));
+                        });
+                        btn.spawn((
+                            Text::new("Spring"),
                             TextFont { font_size: 9.0, ..default() },
                             TextColor(Color::WHITE),
                         ));
@@ -586,6 +653,10 @@ fn render_grid(
                 sprite.image = Handle::default();
                 sprite.color = Color::srgb(0.1, 0.1, 0.1);
             }
+            Cell::Spring => {
+                sprite.image = Handle::default();
+                sprite.color = Color::srgb(0.0, 0.8, 0.7); // teal
+            }
             Cell::Object(w) => {
                 sprite.image = Handle::default();
                 // Match toolbar icon shades: 200kg = lightest, 5000kg = darkest
@@ -674,9 +745,21 @@ fn handle_eraser_button(
     }
 }
 
+fn handle_spring_button(
+    q: Query<&Interaction, (Changed<Interaction>, With<SpringButton>)>,
+    mut selected: ResMut<SelectedTool>,
+) {
+    for interaction in &q {
+        if *interaction == Interaction::Pressed {
+            *selected = SelectedTool::Spring;
+        }
+    }
+}
+
 fn update_tool_buttons(
-    mut weight_query: Query<(&WeightButton, &mut BackgroundColor), Without<EraserButton>>,
-    mut eraser_query: Query<&mut BackgroundColor, With<EraserButton>>,
+    mut weight_query: Query<(&WeightButton, &mut BackgroundColor), (Without<EraserButton>, Without<SpringButton>)>,
+    mut eraser_query: Query<&mut BackgroundColor, (With<EraserButton>, Without<SpringButton>)>,
+    mut spring_query: Query<&mut BackgroundColor, With<SpringButton>>,
     selected: Res<SelectedTool>,
 ) {
     if !selected.is_changed() {
@@ -694,6 +777,13 @@ fn update_tool_buttons(
     }
     for mut color in &mut eraser_query {
         *color = if *selected == SelectedTool::Eraser {
+            BackgroundColor(selected_color)
+        } else {
+            BackgroundColor(unselected_color)
+        };
+    }
+    for mut color in &mut spring_query {
+        *color = if *selected == SelectedTool::Spring {
             BackgroundColor(selected_color)
         } else {
             BackgroundColor(unselected_color)
@@ -831,9 +921,14 @@ fn handle_input(
     mut state: ResMut<GameState>,
     mut selected: ResMut<SelectedTool>,
     config: Res<GridConfig>,
+    mut save_events: MessageWriter<SaveRequested>,
+    mut load_events: MessageWriter<LoadRequested>,
 ) {
     let Ok(window) = windows.single() else { return };
     let Ok((camera, camera_transform)) = camera_q.single() else { return };
+
+    let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight)
+        || keyboard.pressed(KeyCode::SuperLeft) || keyboard.pressed(KeyCode::SuperRight);
 
     if mouse.pressed(MouseButton::Left) {
         if let Some(cursor_pos) = window.cursor_position() {
@@ -847,8 +942,17 @@ fn handle_input(
                             && !matches!(grid.get_cell(bx, by), Cell::Wall)
                         {
                             match *selected {
-                                SelectedTool::Block(w) => grid.set_cell(bx, by, Cell::Object(w)),
+                                // Only place a block if the cell isn't already an Object.
+                                // This prevents holding the mouse over a floating block from
+                                // fighting the physics by re-placing it every frame.
+                                SelectedTool::Block(w) if !matches!(grid.get_cell(bx, by), Cell::Object(_)) => {
+                                    grid.set_cell(bx, by, Cell::Object(w));
+                                }
                                 SelectedTool::Eraser  => grid.set_cell(bx, by, Cell::Air),
+                                SelectedTool::Spring if !matches!(grid.get_cell(bx, by), Cell::Spring) => {
+                                    grid.set_cell(bx, by, Cell::Spring);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -887,6 +991,14 @@ fn handle_input(
     if keyboard.just_pressed(KeyCode::KeyE) {
         *selected = SelectedTool::Eraser;
     }
+    if keyboard.just_pressed(KeyCode::KeyS) && ctrl {
+        save_events.write(SaveRequested);
+    } else if keyboard.just_pressed(KeyCode::KeyS) {
+        *selected = SelectedTool::Spring;
+    }
+    if keyboard.just_pressed(KeyCode::KeyO) && ctrl {
+        load_events.write(LoadRequested);
+    }
     if keyboard.just_pressed(KeyCode::KeyX) {
         state.water_flow = !state.water_flow;
     }
@@ -900,8 +1012,10 @@ fn handle_input(
     }
 }
 
-fn flow_water(mut grid: ResMut<Grid>, _state: Res<GameState>) {
-    // y=0 is always the reservoir — keep it full regardless of gate state.
+fn flow_water(mut grid: ResMut<Grid>, state: Res<GameState>) {
+    if !state.water_flow {
+        return;
+    }
     let flow_rate: f32 = MAX_WATER_KG;
     let width = grid.width;
     for x in 1..width - 1 {
@@ -910,6 +1024,7 @@ fn flow_water(mut grid: ResMut<Grid>, _state: Res<GameState>) {
             Cell::Water(kg) => Cell::Water((kg + flow_rate).min(MAX_WATER_KG)),
             Cell::Object(weight) => Cell::Object(weight),
             Cell::Wall => Cell::Wall,
+            Cell::Spring => Cell::Spring,
         };
         grid.set_cell(x, 0, new_cell);
     }
@@ -1015,6 +1130,9 @@ fn update_status(
 }
 
 fn simulate_objects(mut grid: ResMut<Grid>, state: Res<GameState>) {
+    if !state.water_flow {
+        return;
+    }
     for _ in 0..state.sim_speed {
         grid.cells = step_objects(&grid);
     }
@@ -1026,5 +1144,83 @@ fn simulate_flow(mut grid: ResMut<Grid>, state: Res<GameState>) {
     }
     for _ in 0..state.sim_speed {
         grid.cells = step_simulation(&grid);
+    }
+}
+
+fn handle_save(
+    mut events: MessageReader<SaveRequested>,
+    grid: Res<Grid>,
+    config: Res<GridConfig>,
+    mut pending: ResMut<PendingFileOp>,
+) {
+    for _ in events.read() {
+        if pending.op.is_some() {
+            println!("File dialog already open");
+            return;
+        }
+        pending.op = Some(persistence::save_grid_async(&grid, config.tile_size));
+    }
+}
+
+fn handle_load(
+    mut events: MessageReader<LoadRequested>,
+    config: Res<GridConfig>,
+    grid: Res<Grid>,
+    mut pending: ResMut<PendingFileOp>,
+) {
+    for _ in events.read() {
+        if pending.op.is_some() {
+            println!("File dialog already open");
+            return;
+        }
+        pending.op = Some(persistence::load_grid_async(
+            config.tile_size,
+            grid.width,
+            grid.height,
+        ));
+    }
+}
+
+fn poll_file_op(
+    mut pending: ResMut<PendingFileOp>,
+    mut grid: ResMut<Grid>,
+    mut state: ResMut<GameState>,
+) {
+    let Some(ref op) = pending.op else { return };
+    let done = match op {
+        persistence::PendingIo::Save(rx) => {
+            let rx = rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(Ok(())) => true,
+                Ok(Err(e)) => {
+                    println!("Save failed: {e}");
+                    true
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => false,
+                Err(_) => true,
+            }
+        }
+        persistence::PendingIo::Load(rx) => {
+            let rx = rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(Ok(cells)) => {
+                    grid.cells = cells;
+                    state.water_flow = false;
+                    state.gate_progress = 0;
+                    true
+                }
+                Ok(Err(e)) => {
+                    if e != "Cancelled" {
+                        println!("Load failed: {e}");
+                    }
+                    true
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => false,
+                Err(_) => true,
+            }
+        }
+    };
+    if done {
+        pending.op = None;
     }
 }
