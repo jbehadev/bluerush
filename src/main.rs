@@ -1,28 +1,30 @@
 use bevy::prelude::*;
 
+use crate::config::AppConfig;
 use crate::grid::{GridConfig, GridPlugin};
 use crate::textures::TexturesPlugin;
+mod camera;
+mod config;
 mod grid;
 mod persistence;
+mod render;
 mod simulation;
 mod textures;
+mod ui;
+mod undo;
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    let width: f32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(800.0);
-    let height: f32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(600.0);
-    let tile_size: f32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(16.0);
+    let config = AppConfig::load();
 
     App::new()
         .insert_resource(GridConfig {
-            window_width: width,
-            window_height: height,
-            tile_size,
+            cols: config.grid_cols,
+            rows: config.grid_rows,
+            tile_size: config.tile_size,
         })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                resolution: (width as u32, height as u32).into(),
+                resolution: (config.window_width as u32, config.window_height as u32).into(),
                 ..default()
             }),
             ..default()

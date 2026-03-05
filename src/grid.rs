@@ -1,12 +1,15 @@
+use crate::camera::cursor_to_grid;
 use crate::persistence;
 use crate::simulation::{
     Cell, Grid, MAX_WATER_KG, build_depth_pressure, step_objects, step_simulation,
 };
-use bevy::camera::ScalingMode;
-use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
-use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
+use crate::undo::UndoStack;
+use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::prelude::*;
-use std::f32::consts::FRAC_PI_2;
+
+use crate::camera::CameraPlugin;
+use crate::render::RenderPlugin;
+use crate::ui::UiPlugin;
 
 #[derive(Message)]
 struct SaveRequested;
@@ -18,43 +21,24 @@ pub struct GridPlugin;
 
 impl Plugin for GridPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
+        app.add_plugins((CameraPlugin, UiPlugin, RenderPlugin))
+            .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .add_message::<SaveRequested>()
             .add_message::<LoadRequested>()
             .init_resource::<PendingFileOp>()
+            .init_resource::<UndoStack>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
                 (
-                    (
-                        simulate_objects,
-                        flow_water,
-                        simulate_flow,
-                        render_grid,
-                        handle_input,
-                        handle_weight_buttons,
-                        handle_eraser_button,
-                        handle_spring_button,
-                        update_tool_buttons,
-                        handle_inlet_toggle,
-                        update_inlet_button,
-                        handle_heatmap_toggle,
-                    ),
-                    (
-                        update_heatmap_button,
-                        handle_reset,
-                        animate_gate,
-                        handle_speed_buttons,
-                        update_speed_label,
-                        handle_brush_buttons,
-                        update_brush_label,
-                        update_status,
-                        handle_save,
-                        handle_load,
-                        poll_file_op,
-                    ),
-                    camera_controls,
-                    draw_hover_cursor,
+                    simulate_objects,
+                    flow_water,
+                    simulate_flow,
+                    handle_input,
+                    animate_gate,
+                    handle_save,
+                    handle_load,
+                    poll_file_op,
                 ),
             );
     }
@@ -63,209 +47,40 @@ impl Plugin for GridPlugin {
 // Allow Grid (defined in simulation) to be used as a Bevy resource.
 impl Resource for Grid {}
 
-const PANEL_WIDTH: f32 = 120.0;
+pub const PANEL_WIDTH: f32 = 120.0;
 
 #[derive(Resource, Clone)]
 pub struct GridConfig {
-    pub window_width: f32,
-    pub window_height: f32,
+    pub cols: usize,
+    pub rows: usize,
     pub tile_size: f32,
 }
 
-impl GridConfig {
-    fn grid_cols(&self) -> usize {
-        ((self.window_width - PANEL_WIDTH) / self.tile_size) as usize
-    }
-    fn grid_rows(&self) -> usize {
-        (self.window_height / self.tile_size) as usize
-    }
-}
-
 #[derive(Resource)]
-struct GameState {
-    water_flow: bool,
-    show_pressure: bool,
-    gate_progress: usize, // how many cells are open on each side from center (0 = fully closed)
-    sim_speed: u32,       // simulation steps per frame: 1–16
-    brush_radius: u32,    // 0 = 1×1, 1 = 3×3, 2 = 5×5, …
+pub struct GameState {
+    pub water_flow: bool,
+    pub show_pressure: bool,
+    pub gate_progress: usize,
+    pub sim_speed: u32,
+    pub brush_radius: u32,
 }
 
 #[derive(Resource, PartialEq, Clone)]
-enum SelectedTool {
+pub enum SelectedTool {
     Block(f32),
     Eraser,
     Spring,
+    Drain,
 }
-
-#[derive(Component)]
-struct WeightButton(f32);
-
-#[derive(Component)]
-struct EraserButton;
-
-#[derive(Component)]
-struct SpringButton;
-
-#[derive(Component)]
-struct InletButton;
-
-#[derive(Component)]
-struct ResetButton;
-
-#[derive(Component)]
-struct HeatmapButton;
-
-#[derive(Component)]
-struct StatusText;
-
-#[derive(Component)]
-struct SpeedDownButton;
-
-#[derive(Component)]
-struct SpeedUpButton;
-
-#[derive(Component)]
-struct SpeedLabel;
-
-#[derive(Component)]
-struct BrushDownButton;
-
-#[derive(Component)]
-struct BrushUpButton;
-
-#[derive(Component)]
-struct BrushLabel;
 
 #[derive(Resource, Default)]
 struct PendingFileOp {
     op: Option<persistence::PendingIo>,
 }
 
-#[derive(Resource)]
-struct CameraState {
-    focus: Vec3,
-    zoom: f32,
-    base_offset: Vec3,
-}
-
-#[derive(Component)]
-struct Tile {
-    x: usize,
-    y: usize,
-}
-
-const WATER_PALETTE_SIZE: usize = 32;
-const HEATMAP_PALETTE_SIZE: usize = 64;
-/// Height multiplier so cubes are visible relative to grid width
-const CUBE_HEIGHT: f32 = 5.0;
-
-#[derive(Resource)]
-struct MaterialPalette {
-    air: Handle<StandardMaterial>,
-    wall: Handle<StandardMaterial>,
-    spring: Handle<StandardMaterial>,
-    water: Vec<Handle<StandardMaterial>>,
-    objects: Vec<Handle<StandardMaterial>>,
-    heatmap: Vec<Handle<StandardMaterial>>,
-    heatmap_zero: Handle<StandardMaterial>,
-}
-
-fn build_palette(materials: &mut Assets<StandardMaterial>) -> MaterialPalette {
-    let air = materials.add(Color::srgb(0.34, 0.49, 0.27));
-    let wall = materials.add(Color::srgb(0.1, 0.1, 0.1));
-    let spring = materials.add(Color::srgb(0.0, 0.8, 0.7));
-
-    let water: Vec<_> = (0..WATER_PALETTE_SIZE)
-        .map(|i| {
-            let fill = i as f32 / (WATER_PALETTE_SIZE - 1) as f32;
-            materials.add(Color::srgb(1.0 - fill, 1.0 - fill, 1.0))
-        })
-        .collect();
-
-    let object_grays: &[f32] = &[0.80, 0.65, 0.42, 0.30, 0.10];
-    let objects: Vec<_> = object_grays
-        .iter()
-        .map(|&g| materials.add(Color::srgb(g, g, g)))
-        .collect();
-
-    let heatmap: Vec<_> = (0..HEATMAP_PALETTE_SIZE)
-        .map(|i| {
-            let t = (i as f32 + 1.0) / HEATMAP_PALETTE_SIZE as f32;
-            materials.add(pressure_color(t))
-        })
-        .collect();
-    let heatmap_zero = materials.add(Color::WHITE);
-
-    MaterialPalette {
-        air,
-        wall,
-        spring,
-        water,
-        objects,
-        heatmap,
-        heatmap_zero,
-    }
-}
-
-fn setup(
-    mut commands: Commands,
-    config: Res<GridConfig>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut config_store: ResMut<GizmoConfigStore>,
-) {
-    let width = config.grid_cols();
-    let height = config.grid_rows();
-
-    // 3D Camera — orthographic isometric view looking down at the grid
-    // Shift camera left so the grid centers in the area right of the toolbar
-    let panel_frac = PANEL_WIDTH / config.window_width;
-    let vis_width = width as f32 + 4.0;
-    let aspect_ratio = 16.0 / 9.0; // Your desired aspect ratio
-    let vis_height = vis_width / aspect_ratio; // Calculate height
-    let panel_offset = panel_frac * vis_width / 2.0;
-    let center_x = width as f32 / 2.0 - panel_offset;
-    let center_z = height as f32 / 2.0;
-    let grid_extent = (width as f32 / 2.0).max(center_z);
-
-    let focus = Vec3::new(center_x, 0.0, center_z);
-    let cam_pos = Vec3::new(
-        center_x + grid_extent * 0.5,
-        grid_extent * 1.2,
-        center_z + grid_extent * 0.5,
-    );
-    let base_offset = cam_pos - focus;
-
-    commands.spawn((
-        Camera3d::default(),
-        Projection::Orthographic(OrthographicProjection {
-            scaling_mode: ScalingMode::FixedHorizontal {
-                viewport_width: vis_width * 1.5, // Adjust as needed
-            },
-            ..OrthographicProjection::default_3d()
-        }),
-        Transform::from_translation(cam_pos).looking_at(focus, Vec3::Y),
-    ));
-
-    commands.insert_resource(CameraState {
-        focus,
-        zoom: 1.0,
-        base_offset,
-    });
-
-    // Directional light (sun) for shadows and depth
-    commands.spawn((
-        DirectionalLight {
-            shadows_enabled: true,
-            illuminance: 12000.0,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.4, 0.0)),
-    ));
-
-    // Configure gizmos to always render on top of geometry
-    config_store.config_mut::<DefaultGizmoConfigGroup>().0.depth_bias = -1.0;
-    config_store.config_mut::<DefaultGizmoConfigGroup>().0.line.width = 2.0;
+fn setup(mut commands: Commands, config: Res<GridConfig>) {
+    let width = config.cols;
+    let height = config.rows;
 
     commands.insert_resource(GameState {
         water_flow: false,
@@ -276,882 +91,6 @@ fn setup(
     });
     commands.insert_resource(SelectedTool::Block(200.0));
     commands.insert_resource(Grid::init(width, height));
-
-    // Build shared material palette (enables draw-call batching)
-    let palette = build_palette(&mut materials);
-
-    // Shared cube mesh for all tiles
-    let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-
-    for row in 0..height {
-        for col in 0..width {
-            commands.spawn((
-                Mesh3d(cube_mesh.clone()),
-                MeshMaterial3d(palette.air.clone()),
-                Transform::from_xyz(col as f32, 0.05, row as f32)
-                    .with_scale(Vec3::new(1.0, 0.1, 1.0)),
-                Tile { x: col, y: row },
-            ));
-        }
-    }
-
-    commands.insert_resource(palette);
-
-    // Left toolbar — SimCity-style icon panel
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(0.0),
-                left: Val::Px(0.0),
-                width: Val::Px(PANEL_WIDTH),
-                height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                padding: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(12.0), Val::Px(0.0)),
-                row_gap: Val::Px(6.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgb(0.12, 0.12, 0.15)),
-        ))
-        .with_children(|parent| {
-            // Section label
-            parent.spawn((
-                Text::new("OBJECTS"),
-                TextFont {
-                    font_size: 9.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.55, 0.55, 0.60)),
-            ));
-
-            // 2-column icon grid for weight buttons + eraser
-            parent
-                .spawn((Node {
-                    flex_direction: FlexDirection::Row,
-                    flex_wrap: FlexWrap::Wrap,
-                    justify_content: JustifyContent::Center,
-                    column_gap: Val::Px(4.0),
-                    row_gap: Val::Px(4.0),
-                    padding: UiRect::horizontal(Val::Px(8.0)),
-                    ..default()
-                },))
-                .with_children(|grid| {
-                    // Weight icon buttons
-                    let weights: &[(f32, f32, f32)] = &[
-                        (200.0, 14.0, 0.80),
-                        (500.0, 20.0, 0.65),
-                        (1000.0, 26.0, 0.42),
-                        (2000.0, 32.0, 0.30),
-                        (5000.0, 38.0, 0.10),
-                    ];
-                    for &(weight, icon_size, gray) in weights {
-                        let is_selected = weight == 200.0;
-                        grid.spawn((
-                            Button,
-                            Node {
-                                width: Val::Px(50.0),
-                                height: Val::Px(56.0),
-                                flex_direction: FlexDirection::Column,
-                                align_items: AlignItems::Center,
-                                justify_content: JustifyContent::FlexEnd,
-                                padding: UiRect::bottom(Val::Px(4.0)),
-                                ..default()
-                            },
-                            BackgroundColor(if is_selected {
-                                Color::srgb(0.18, 0.36, 0.65)
-                            } else {
-                                Color::srgb(0.55, 0.55, 0.58)
-                            }),
-                            WeightButton(weight),
-                        ))
-                        .with_children(|btn| {
-                            // Icon area
-                            btn.spawn((Node {
-                                width: Val::Px(50.0),
-                                height: Val::Px(38.0),
-                                align_items: AlignItems::Center,
-                                justify_content: JustifyContent::Center,
-                                ..default()
-                            },))
-                                .with_children(|icon| {
-                                    icon.spawn((
-                                        Node {
-                                            width: Val::Px(icon_size),
-                                            height: Val::Px(icon_size),
-                                            ..default()
-                                        },
-                                        BackgroundColor(Color::srgb(gray, gray, gray)),
-                                    ));
-                                });
-                            // Label
-                            btn.spawn((
-                                Text::new(format!("{}kg", weight as u32)),
-                                TextFont {
-                                    font_size: 9.0,
-                                    ..default()
-                                },
-                                TextColor(Color::WHITE),
-                            ));
-                        });
-                    }
-
-                    // Eraser button
-                    grid.spawn((
-                        Button,
-                        Node {
-                            width: Val::Px(50.0),
-                            height: Val::Px(56.0),
-                            flex_direction: FlexDirection::Column,
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::FlexEnd,
-                            padding: UiRect::bottom(Val::Px(4.0)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.55, 0.55, 0.58)),
-                        EraserButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((Node {
-                            width: Val::Px(50.0),
-                            height: Val::Px(38.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },))
-                            .with_children(|icon| {
-                                icon.spawn((
-                                    Node {
-                                        width: Val::Px(30.0),
-                                        height: Val::Px(14.0),
-                                        ..default()
-                                    },
-                                    BackgroundColor(Color::srgb(0.95, 0.70, 0.70)),
-                                ));
-                            });
-                        btn.spawn((
-                            Text::new("Erase"),
-                            TextFont {
-                                font_size: 9.0,
-                                ..default()
-                            },
-                            TextColor(Color::WHITE),
-                        ));
-                    });
-
-                    // Spring tool button
-                    grid.spawn((
-                        Button,
-                        Node {
-                            width: Val::Px(50.0),
-                            height: Val::Px(56.0),
-                            flex_direction: FlexDirection::Column,
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::FlexEnd,
-                            padding: UiRect::bottom(Val::Px(4.0)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.55, 0.55, 0.58)),
-                        SpringButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((Node {
-                            width: Val::Px(50.0),
-                            height: Val::Px(38.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },))
-                            .with_children(|icon| {
-                                icon.spawn((
-                                    Node {
-                                        width: Val::Px(14.0),
-                                        height: Val::Px(14.0),
-                                        ..default()
-                                    },
-                                    BackgroundColor(Color::srgb(0.0, 0.8, 0.7)),
-                                ));
-                            });
-                        btn.spawn((
-                            Text::new("Spring"),
-                            TextFont {
-                                font_size: 9.0,
-                                ..default()
-                            },
-                            TextColor(Color::WHITE),
-                        ));
-                    });
-                });
-
-            // BRUSH section
-            parent.spawn((
-                Text::new("BRUSH"),
-                TextFont {
-                    font_size: 9.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.55, 0.55, 0.60)),
-            ));
-
-            parent
-                .spawn((Node {
-                    width: Val::Px(104.0),
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::SpaceBetween,
-                    ..default()
-                },))
-                .with_children(|row| {
-                    row.spawn((
-                        Button,
-                        Node {
-                            width: Val::Px(30.0),
-                            height: Val::Px(28.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
-                        BrushDownButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("-"),
-                            TextFont {
-                                font_size: 16.0,
-                                ..default()
-                            },
-                            TextColor(Color::WHITE),
-                        ));
-                    });
-
-                    row.spawn((
-                        Text::new("1"),
-                        TextFont {
-                            font_size: 14.0,
-                            ..default()
-                        },
-                        TextColor(Color::WHITE),
-                        BrushLabel,
-                    ));
-
-                    row.spawn((
-                        Button,
-                        Node {
-                            width: Val::Px(30.0),
-                            height: Val::Px(28.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
-                        BrushUpButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("+"),
-                            TextFont {
-                                font_size: 16.0,
-                                ..default()
-                            },
-                            TextColor(Color::WHITE),
-                        ));
-                    });
-                });
-
-            // Divider
-            parent.spawn((
-                Node {
-                    width: Val::Percent(80.0),
-                    height: Val::Px(1.0),
-                    margin: UiRect::vertical(Val::Px(8.0)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgb(0.35, 0.35, 0.40)),
-            ));
-
-            // FLOW section label
-            parent.spawn((
-                Text::new("FLOW"),
-                TextFont {
-                    font_size: 9.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.55, 0.55, 0.60)),
-            ));
-
-            // Inlet toggle button
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(104.0),
-                        height: Val::Px(32.0),
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.4, 0.15, 0.15)),
-                    InletButton,
-                ))
-                .with_children(|btn| {
-                    btn.spawn((
-                        Text::new("Inlet"),
-                        TextFont {
-                            font_size: 12.0,
-                            ..default()
-                        },
-                        TextColor(Color::WHITE),
-                    ));
-                });
-
-            // Heatmap toggle button
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(104.0),
-                        height: Val::Px(32.0),
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
-                    HeatmapButton,
-                ))
-                .with_children(|btn| {
-                    btn.spawn((
-                        Text::new("Pressure"),
-                        TextFont {
-                            font_size: 12.0,
-                            ..default()
-                        },
-                        TextColor(Color::WHITE),
-                    ));
-                });
-
-            // Divider
-            parent.spawn((
-                Node {
-                    width: Val::Percent(80.0),
-                    height: Val::Px(1.0),
-                    margin: UiRect::vertical(Val::Px(8.0)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgb(0.35, 0.35, 0.40)),
-            ));
-
-            // Reset button
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(104.0),
-                        height: Val::Px(32.0),
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.50, 0.12, 0.12)),
-                    ResetButton,
-                ))
-                .with_children(|btn| {
-                    btn.spawn((
-                        Text::new("Reset"),
-                        TextFont {
-                            font_size: 12.0,
-                            ..default()
-                        },
-                        TextColor(Color::WHITE),
-                    ));
-                });
-
-            // Speed controls: [-] x1 [+]
-            parent
-                .spawn((Node {
-                    width: Val::Px(104.0),
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::SpaceBetween,
-                    margin: UiRect::top(Val::Px(12.0)),
-                    ..default()
-                },))
-                .with_children(|row| {
-                    // Decrement button
-                    row.spawn((
-                        Button,
-                        Node {
-                            width: Val::Px(30.0),
-                            height: Val::Px(28.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
-                        SpeedDownButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("-"),
-                            TextFont {
-                                font_size: 16.0,
-                                ..default()
-                            },
-                            TextColor(Color::WHITE),
-                        ));
-                    });
-
-                    // Speed label (center)
-                    row.spawn((
-                        Text::new("x1"),
-                        TextFont {
-                            font_size: 14.0,
-                            ..default()
-                        },
-                        TextColor(Color::WHITE),
-                        SpeedLabel,
-                    ));
-
-                    // Increment button
-                    row.spawn((
-                        Button,
-                        Node {
-                            width: Val::Px(30.0),
-                            height: Val::Px(28.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
-                        SpeedUpButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("+"),
-                            TextFont {
-                                font_size: 16.0,
-                                ..default()
-                            },
-                            TextColor(Color::WHITE),
-                        ));
-                    });
-                });
-        });
-
-    // Status bar — pinned to the bottom of the grid area
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(0.0),
-                left: Val::Px(PANEL_WIDTH),
-                right: Val::Px(0.0),
-                height: Val::Px(22.0),
-                align_items: AlignItems::Center,
-                padding: UiRect::horizontal(Val::Px(10.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.65)),
-        ))
-        .with_children(|bar| {
-            bar.spawn((
-                Text::new(""),
-                TextFont {
-                    font_size: 13.0,
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                StatusText,
-            ));
-        });
-}
-
-fn render_grid(
-    grid: Res<Grid>,
-    mut tile_query: Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
-    palette: Res<MaterialPalette>,
-    state: Res<GameState>,
-) {
-    if state.show_pressure {
-        render_heat_grid_3d(&grid, &mut tile_query, &palette);
-        return;
-    }
-    for (tile, mut transform, mut mat) in &mut tile_query {
-        let cell = &grid.cells[tile.y * grid.width + tile.x];
-        let (h, handle) = match cell {
-            Cell::Air => (0.1, &palette.air),
-            Cell::Water(kg) => {
-                let fill = kg / MAX_WATER_KG;
-                let idx = (fill * (WATER_PALETTE_SIZE - 1) as f32).round() as usize;
-                (
-                    0.1 + fill * 0.9,
-                    &palette.water[idx.min(WATER_PALETTE_SIZE - 1)],
-                )
-            }
-            Cell::Wall => (1.0, &palette.wall),
-            Cell::Spring => (1.0, &palette.spring),
-            Cell::Object(w) => {
-                let idx = if *w <= 200.0 {
-                    0
-                } else if *w <= 500.0 {
-                    1
-                } else if *w <= 1000.0 {
-                    2
-                } else if *w <= 2000.0 {
-                    3
-                } else {
-                    4
-                };
-                (0.8, &palette.objects[idx])
-            }
-        };
-        let scaled = h * CUBE_HEIGHT;
-        transform.scale.y = scaled;
-        transform.translation.y = scaled / 2.0;
-        mat.0 = handle.clone();
-    }
-}
-
-/// Maps t ∈ [0,1] through a five-stop rainbow: blue → cyan → green → yellow → red.
-fn pressure_color(t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    let (r, g, b) = if t < 0.25 {
-        let s = t / 0.25;
-        (0.0, s, 1.0) // blue → cyan
-    } else if t < 0.5 {
-        let s = (t - 0.25) / 0.25;
-        (0.0, 1.0, 1.0 - s) // cyan → green
-    } else if t < 0.75 {
-        let s = (t - 0.5) / 0.25;
-        (s, 1.0, 0.0) // green → yellow
-    } else {
-        let s = (t - 0.75) / 0.25;
-        (1.0, 1.0 - s, 0.0) // yellow → red
-    };
-    Color::srgb(r, g, b)
-}
-
-fn render_heat_grid_3d(
-    grid: &Grid,
-    tile_query: &mut Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
-    palette: &MaterialPalette,
-) {
-    let depth = build_depth_pressure(grid);
-    let max = depth.iter().cloned().fold(1.0f32, f32::max);
-
-    for (tile, mut transform, mut mat) in tile_query.iter_mut() {
-        let idx = tile.y * grid.width + tile.x;
-        let val = depth[idx];
-        let handle = if val > 0.0 {
-            let t = val / max;
-            let i = (t * (HEATMAP_PALETTE_SIZE - 1) as f32).round() as usize;
-            &palette.heatmap[i.min(HEATMAP_PALETTE_SIZE - 1)]
-        } else {
-            &palette.heatmap_zero
-        };
-
-        let h = match &grid.cells[idx] {
-            Cell::Air => 0.1,
-            Cell::Water(kg) => 0.1 + (kg / MAX_WATER_KG) * 0.9,
-            Cell::Wall => 1.0,
-            Cell::Spring => 1.0,
-            Cell::Object(_) => 0.8,
-        };
-        let scaled = h * CUBE_HEIGHT;
-        transform.scale.y = scaled;
-        transform.translation.y = scaled / 2.0;
-        mat.0 = handle.clone();
-    }
-}
-
-fn handle_weight_buttons(
-    interaction_query: Query<(&Interaction, &WeightButton), Changed<Interaction>>,
-    mut selected: ResMut<SelectedTool>,
-) {
-    for (interaction, weight_btn) in &interaction_query {
-        if *interaction == Interaction::Pressed {
-            *selected = SelectedTool::Block(weight_btn.0);
-        }
-    }
-}
-
-fn handle_eraser_button(
-    q: Query<&Interaction, (Changed<Interaction>, With<EraserButton>)>,
-    mut selected: ResMut<SelectedTool>,
-) {
-    for interaction in &q {
-        if *interaction == Interaction::Pressed {
-            *selected = SelectedTool::Eraser;
-        }
-    }
-}
-
-fn handle_spring_button(
-    q: Query<&Interaction, (Changed<Interaction>, With<SpringButton>)>,
-    mut selected: ResMut<SelectedTool>,
-) {
-    for interaction in &q {
-        if *interaction == Interaction::Pressed {
-            *selected = SelectedTool::Spring;
-        }
-    }
-}
-
-fn update_tool_buttons(
-    mut weight_query: Query<
-        (&WeightButton, &mut BackgroundColor),
-        (Without<EraserButton>, Without<SpringButton>),
-    >,
-    mut eraser_query: Query<&mut BackgroundColor, (With<EraserButton>, Without<SpringButton>)>,
-    mut spring_query: Query<&mut BackgroundColor, With<SpringButton>>,
-    selected: Res<SelectedTool>,
-) {
-    if !selected.is_changed() {
-        return;
-    }
-    let selected_color = Color::srgb(0.18, 0.36, 0.65);
-    let unselected_color = Color::srgb(0.55, 0.55, 0.58);
-
-    for (btn, mut color) in &mut weight_query {
-        *color = if *selected == SelectedTool::Block(btn.0) {
-            BackgroundColor(selected_color)
-        } else {
-            BackgroundColor(unselected_color)
-        };
-    }
-    for mut color in &mut eraser_query {
-        *color = if *selected == SelectedTool::Eraser {
-            BackgroundColor(selected_color)
-        } else {
-            BackgroundColor(unselected_color)
-        };
-    }
-    for mut color in &mut spring_query {
-        *color = if *selected == SelectedTool::Spring {
-            BackgroundColor(selected_color)
-        } else {
-            BackgroundColor(unselected_color)
-        };
-    }
-}
-
-fn handle_inlet_toggle(
-    interaction_query: Query<&Interaction, (Changed<Interaction>, With<InletButton>)>,
-    mut state: ResMut<GameState>,
-) {
-    for interaction in &interaction_query {
-        if *interaction == Interaction::Pressed {
-            state.water_flow = !state.water_flow;
-        }
-    }
-}
-
-fn update_inlet_button(
-    mut query: Query<&mut BackgroundColor, With<InletButton>>,
-    state: Res<GameState>,
-) {
-    if !state.is_changed() {
-        return;
-    }
-    for mut color in &mut query {
-        *color = if state.water_flow {
-            BackgroundColor(Color::srgb(0.1, 0.6, 0.2)) // green = ON
-        } else {
-            BackgroundColor(Color::srgb(0.4, 0.15, 0.15)) // dark red = OFF
-        };
-    }
-}
-
-fn handle_heatmap_toggle(
-    interaction_query: Query<&Interaction, (Changed<Interaction>, With<HeatmapButton>)>,
-    mut state: ResMut<GameState>,
-) {
-    for interaction in &interaction_query {
-        if *interaction == Interaction::Pressed {
-            state.show_pressure = !state.show_pressure;
-        }
-    }
-}
-
-fn update_heatmap_button(
-    mut query: Query<&mut BackgroundColor, With<HeatmapButton>>,
-    state: Res<GameState>,
-) {
-    if !state.is_changed() {
-        return;
-    }
-    for mut color in &mut query {
-        *color = if state.show_pressure {
-            BackgroundColor(Color::srgb(0.2, 0.5, 0.8)) // blue = ON
-        } else {
-            BackgroundColor(Color::srgb(0.3, 0.3, 0.3)) // gray = OFF
-        };
-    }
-}
-
-fn handle_reset(
-    interaction_query: Query<&Interaction, (Changed<Interaction>, With<ResetButton>)>,
-    mut grid: ResMut<Grid>,
-    mut state: ResMut<GameState>,
-) {
-    for interaction in &interaction_query {
-        if *interaction == Interaction::Pressed {
-            *grid = Grid::init(grid.width, grid.height);
-            state.water_flow = false;
-            state.gate_progress = 0;
-        }
-    }
-}
-
-/// Opens the gate at y=1 one cell per side per frame when the inlet is ON,
-/// closes it one cell per side per frame when OFF (overwrites any water).
-fn animate_gate(mut grid: ResMut<Grid>, mut state: ResMut<GameState>) {
-    let center = grid.width / 2;
-    // Left and right interiors are not always equal (odd-width grids round center down),
-    // so track each side's limit independently.
-    let left_max = center - 1; // leftmost valid cell is x=1
-    let right_max = grid.width - 1 - center; // rightmost valid cell is x=width-2
-    let max_progress = left_max.max(right_max);
-
-    if state.water_flow && state.gate_progress < max_progress {
-        let p = state.gate_progress;
-        if p < left_max {
-            grid.set_cell(center - p - 1, 1, Cell::Air);
-        }
-        if p < right_max {
-            grid.set_cell(center + p, 1, Cell::Air);
-        }
-        state.gate_progress += 1;
-    } else if !state.water_flow && state.gate_progress > 0 {
-        let p = state.gate_progress;
-        if p <= left_max {
-            grid.set_cell(center - p, 1, Cell::Wall);
-        }
-        if p <= right_max {
-            grid.set_cell(center + p - 1, 1, Cell::Wall);
-        }
-        state.gate_progress -= 1;
-    }
-}
-
-/// Converts a cursor window position to a grid cell, or None if it's in the toolbar/OOB.
-/// Casts a ray from the 3D camera through the cursor onto the Y=0 ground plane.
-fn cursor_to_grid(
-    cursor_pos: Vec2,
-    camera: &Camera,
-    camera_transform: &GlobalTransform,
-) -> Option<(usize, usize)> {
-    // Reject anything inside the left toolbar panel (window pixels)
-    if cursor_pos.x < PANEL_WIDTH {
-        return None;
-    }
-    let ray = camera
-        .viewport_to_world(camera_transform, cursor_pos)
-        .ok()?;
-    // Intersect ray with Y=0 ground plane
-    let denom = ray.direction.y;
-    if denom.abs() < 1e-6 {
-        return None;
-    }
-    let t = -ray.origin.y / denom;
-    if t < 0.0 {
-        return None;
-    }
-    let hit = ray.origin + t * *ray.direction;
-    // 1 world unit = 1 tile; tile centers at integer coords
-    let gx = (hit.x + 0.5).floor();
-    let gz = (hit.z + 0.5).floor();
-    if gx < 0.0 || gz < 0.0 {
-        return None;
-    }
-    Some((gx as usize, gz as usize))
-}
-
-fn camera_controls(
-    mouse: Res<ButtonInput<MouseButton>>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut scroll_events: MessageReader<MouseWheel>,
-    accumulated_motion: Res<AccumulatedMouseMotion>,
-    windows: Query<&Window>,
-    mut camera_q: Query<(&mut Transform, &mut Projection)>,
-    mut cam_state: ResMut<CameraState>,
-    config: Res<GridConfig>,
-) {
-    let Ok(window) = windows.single() else { return };
-    let Ok((mut cam_transform, mut projection)) = camera_q.single_mut() else {
-        return;
-    };
-    let mut changed = false;
-
-    // Only interact when cursor is over the 3D area (not the toolbar)
-    let cursor_over_grid = window
-        .cursor_position()
-        .is_some_and(|pos| pos.x >= PANEL_WIDTH);
-
-    // --- Zoom via scroll wheel ---
-    // Use multiplicative zoom for smooth feel; different sensitivity per scroll unit.
-    // Mac trackpad/Magic Mouse sends Pixel units with large deltas,
-    // regular mice send Line units with small deltas.
-    for ev in scroll_events.read() {
-        if cursor_over_grid {
-            let scroll_amount = match ev.unit {
-                MouseScrollUnit::Line => ev.y * 0.15,
-                MouseScrollUnit::Pixel => ev.y * 0.002,
-            };
-            // Multiplicative: zoom *= (1 + scroll). Feels proportional at any zoom level.
-            cam_state.zoom *= 1.0 - scroll_amount;
-            cam_state.zoom = cam_state.zoom.clamp(0.2, 5.0);
-            changed = true;
-        }
-    }
-
-    // --- Pan via right mouse drag ---
-    if mouse.pressed(MouseButton::Right)
-        && cursor_over_grid
-        && accumulated_motion.delta != Vec2::ZERO
-    {
-        let Projection::Orthographic(ref ortho) = *projection else {
-            return;
-        };
-        // Convert pixel delta to world units
-        let pixels_to_world = (ortho.area.max.x - ortho.area.min.x) / window.width();
-
-        // Camera right/forward projected onto XZ ground plane
-        let right = cam_transform.right();
-        let right_xz = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
-        let forward = cam_transform.forward();
-        let forward_xz = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-
-        let motion = accumulated_motion.delta;
-        // Dragging right moves the view left (world moves opposite to drag)
-        let pan = (-motion.x * right_xz + motion.y * forward_xz) * pixels_to_world;
-        cam_state.focus += pan;
-        changed = true;
-    }
-
-    // --- Reset on Home key ---
-    if keyboard.just_pressed(KeyCode::Home) {
-        let width = config.grid_cols();
-        let height = config.grid_rows();
-        let panel_frac = PANEL_WIDTH / config.window_width;
-        let vis_width = width as f32 + 4.0;
-        let panel_offset = panel_frac * vis_width / 2.0;
-        let center_x = width as f32 / 2.0 - panel_offset;
-        let center_z = height as f32 / 2.0;
-        cam_state.focus = Vec3::new(center_x, 0.0, center_z);
-        cam_state.zoom = 1.0;
-        changed = true;
-    }
-
-    // --- Apply camera state ---
-    if changed {
-        if let Projection::Orthographic(ref mut ortho) = *projection {
-            ortho.scale = cam_state.zoom;
-        }
-        let new_pos = cam_state.focus + cam_state.base_offset;
-        *cam_transform =
-            Transform::from_translation(new_pos).looking_at(cam_state.focus, Vec3::Y);
-    }
 }
 
 fn handle_input(
@@ -1164,6 +103,7 @@ fn handle_input(
     mut selected: ResMut<SelectedTool>,
     mut save_events: MessageWriter<SaveRequested>,
     mut load_events: MessageWriter<LoadRequested>,
+    mut undo_stack: ResMut<UndoStack>,
 ) {
     let Ok(window) = windows.single() else { return };
     let Ok((camera, camera_transform)) = camera_q.single() else {
@@ -1187,22 +127,29 @@ fn handle_input(
                             && by < grid.height
                             && !matches!(grid.get_cell(bx, by), Cell::Wall)
                         {
-                            match *selected {
-                                // Only place a block if the cell isn't already an Object.
-                                // This prevents holding the mouse over a floating block from
-                                // fighting the physics by re-placing it every frame.
+                            let new_cell = match *selected {
                                 SelectedTool::Block(w)
                                     if !matches!(grid.get_cell(bx, by), Cell::Object(_)) =>
                                 {
-                                    grid.set_cell(bx, by, Cell::Object(w));
+                                    Some(Cell::Object(w))
                                 }
-                                SelectedTool::Eraser => grid.set_cell(bx, by, Cell::Air),
+                                SelectedTool::Eraser => Some(Cell::Air),
                                 SelectedTool::Spring
                                     if !matches!(grid.get_cell(bx, by), Cell::Spring) =>
                                 {
-                                    grid.set_cell(bx, by, Cell::Spring);
+                                    Some(Cell::Spring)
                                 }
-                                _ => {}
+                                SelectedTool::Drain
+                                    if !matches!(grid.get_cell(bx, by), Cell::Drain) =>
+                                {
+                                    Some(Cell::Drain)
+                                }
+                                _ => None,
+                            };
+                            if let Some(new) = new_cell {
+                                let old = grid.get_cell(bx, by).clone();
+                                undo_stack.record(bx, by, old, new.clone());
+                                grid.set_cell(bx, by, new);
                             }
                         }
                     }
@@ -1210,7 +157,20 @@ fn handle_input(
             }
         }
     }
+    // Commit pending undo changes when mouse is released
+    if mouse.just_released(MouseButton::Left) && undo_stack.has_pending() {
+        undo_stack.commit();
+    }
+
+    // Undo/Redo shortcuts: Cmd+Z / Cmd+Shift+Z
     let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    if ctrl && keyboard.just_pressed(KeyCode::KeyZ) {
+        if shift {
+            undo_stack.redo(&mut grid);
+        } else {
+            undo_stack.undo(&mut grid);
+        }
+    }
     if mouse.just_pressed(MouseButton::Right) && shift {
         if let Some(cursor_pos) = window.cursor_position() {
             if let Some((grid_x, grid_y)) = cursor_to_grid(cursor_pos, camera, camera_transform) {
@@ -1242,6 +202,9 @@ fn handle_input(
     if keyboard.just_pressed(KeyCode::KeyE) {
         *selected = SelectedTool::Eraser;
     }
+    if keyboard.just_pressed(KeyCode::KeyD) && !ctrl {
+        *selected = SelectedTool::Drain;
+    }
     if keyboard.just_pressed(KeyCode::KeyS) && ctrl {
         save_events.write(SaveRequested);
     } else if keyboard.just_pressed(KeyCode::KeyS) {
@@ -1257,9 +220,39 @@ fn handle_input(
         *grid = Grid::init(grid.width, grid.height);
         state.water_flow = false;
         state.gate_progress = 0;
+        undo_stack.clear();
     }
     if keyboard.just_pressed(KeyCode::KeyM) {
         state.show_pressure = !state.show_pressure;
+    }
+}
+
+/// Opens the gate at y=1 one cell per side per frame when the inlet is ON,
+/// closes it one cell per side per frame when OFF (overwrites any water).
+fn animate_gate(mut grid: ResMut<Grid>, mut state: ResMut<GameState>) {
+    let center = grid.width / 2;
+    let left_max = center - 1;
+    let right_max = grid.width - 1 - center;
+    let max_progress = left_max.max(right_max);
+
+    if state.water_flow && state.gate_progress < max_progress {
+        let p = state.gate_progress;
+        if p < left_max {
+            grid.set_cell(center - p - 1, 1, Cell::Air);
+        }
+        if p < right_max {
+            grid.set_cell(center + p, 1, Cell::Air);
+        }
+        state.gate_progress += 1;
+    } else if !state.water_flow && state.gate_progress > 0 {
+        let p = state.gate_progress;
+        if p <= left_max {
+            grid.set_cell(center - p, 1, Cell::Wall);
+        }
+        if p <= right_max {
+            grid.set_cell(center + p - 1, 1, Cell::Wall);
+        }
+        state.gate_progress -= 1;
     }
 }
 
@@ -1276,107 +269,9 @@ fn flow_water(mut grid: ResMut<Grid>, state: Res<GameState>) {
             Cell::Object(weight) => Cell::Object(weight),
             Cell::Wall => Cell::Wall,
             Cell::Spring => Cell::Spring,
+            Cell::Drain => Cell::Drain,
         };
         grid.set_cell(x, 0, new_cell);
-    }
-}
-
-fn handle_speed_buttons(
-    down_q: Query<&Interaction, (Changed<Interaction>, With<SpeedDownButton>)>,
-    up_q: Query<&Interaction, (Changed<Interaction>, With<SpeedUpButton>)>,
-    mut state: ResMut<GameState>,
-) {
-    for interaction in &down_q {
-        if *interaction == Interaction::Pressed {
-            state.sim_speed = (state.sim_speed - 1).max(1);
-        }
-    }
-    for interaction in &up_q {
-        if *interaction == Interaction::Pressed {
-            state.sim_speed = (state.sim_speed + 1).min(16);
-        }
-    }
-}
-
-fn update_speed_label(mut label_query: Query<&mut Text, With<SpeedLabel>>, state: Res<GameState>) {
-    if !state.is_changed() {
-        return;
-    }
-    for mut text in &mut label_query {
-        **text = format!("x{}", state.sim_speed);
-    }
-}
-
-fn handle_brush_buttons(
-    down_q: Query<&Interaction, (Changed<Interaction>, With<BrushDownButton>)>,
-    up_q: Query<&Interaction, (Changed<Interaction>, With<BrushUpButton>)>,
-    mut state: ResMut<GameState>,
-) {
-    for interaction in &down_q {
-        if *interaction == Interaction::Pressed {
-            state.brush_radius = state.brush_radius.saturating_sub(1);
-        }
-    }
-    for interaction in &up_q {
-        if *interaction == Interaction::Pressed {
-            state.brush_radius = (state.brush_radius + 1).min(5);
-        }
-    }
-}
-
-fn update_brush_label(mut label_query: Query<&mut Text, With<BrushLabel>>, state: Res<GameState>) {
-    if !state.is_changed() {
-        return;
-    }
-    let diameter = state.brush_radius * 2 + 1;
-    for mut text in &mut label_query {
-        **text = format!("{}", diameter);
-    }
-}
-
-fn update_status(
-    mut query: Query<&mut Text, With<StatusText>>,
-    diagnostics: Res<DiagnosticsStore>,
-    grid: Res<Grid>,
-    state: Res<GameState>,
-) {
-    let fps = diagnostics
-        .get(&FrameTimeDiagnosticsPlugin::FPS)
-        .and_then(|d| d.smoothed())
-        .unwrap_or(0.0);
-
-    let water_kg: f32 = grid
-        .cells
-        .iter()
-        .filter_map(|c| {
-            if let Cell::Water(kg) = c {
-                Some(*kg)
-            } else {
-                None
-            }
-        })
-        .sum();
-
-    let water_str = if water_kg >= 1_000_000.0 {
-        format!("{:.1}kt", water_kg / 1_000_000.0)
-    } else if water_kg >= 1_000.0 {
-        format!("{:.1}t", water_kg / 1_000.0)
-    } else {
-        format!("{:.0}kg", water_kg)
-    };
-
-    let object_count = grid
-        .cells
-        .iter()
-        .filter(|c| matches!(c, Cell::Object(_)))
-        .count();
-
-    let speed_str = format!("x{}", state.sim_speed);
-
-    for mut text in &mut query {
-        **text = format!(
-            "FPS: {fps:.0}  |  Water: {water_str}  |  Objects: {object_count}  |  Speed: {speed_str}"
-        );
     }
 }
 
@@ -1473,44 +368,5 @@ fn poll_file_op(
     };
     if done {
         pending.op = None;
-    }
-}
-
-fn draw_hover_cursor(
-    windows: Query<&Window>,
-    camera_q: Query<(&Camera, &GlobalTransform)>,
-    grid: Res<Grid>,
-    state: Res<GameState>,
-    mut gizmos: Gizmos,
-) {
-    let Ok(window) = windows.single() else { return };
-    let Ok((camera, camera_transform)) = camera_q.single() else {
-        return;
-    };
-    let Some(cursor_pos) = window.cursor_position() else {
-        return;
-    };
-    let Some((cx, cy)) = cursor_to_grid(cursor_pos, camera, camera_transform) else {
-        return;
-    };
-
-    let r = state.brush_radius as usize;
-    // Rotation to lay the rect flat on the XZ ground plane
-    let rotation = Quat::from_rotation_x(-FRAC_PI_2);
-    let color = Color::srgba(1.0, 1.0, 0.0, 0.9);
-
-    for dy in 0..=(r * 2) {
-        for dx in 0..=(r * 2) {
-            let bx = (cx + dx).saturating_sub(r);
-            let by = (cy + dy).saturating_sub(r);
-            if bx < grid.width && by < grid.height {
-                let center = Vec3::new(bx as f32, 0.3, by as f32);
-                gizmos.rect(
-                    Isometry3d::new(center, rotation),
-                    Vec2::splat(1.0),
-                    color,
-                );
-            }
-        }
     }
 }

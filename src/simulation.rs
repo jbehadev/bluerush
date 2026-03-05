@@ -1,15 +1,17 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 pub const MAX_WATER_KG: f32 = 1000.0;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Cell {
     Air,
     Water(f32),
     Object(f32),
     Wall,
     Spring, // fixed water source; always holds MAX_WATER_KG
+    Drain,  // fixed water sink; always holds 0 kg
 }
 
 pub struct Grid {
@@ -70,6 +72,7 @@ fn flow_capacity(cell: &Cell) -> Option<f32> {
     match cell {
         Cell::Water(f) => Some(*f),
         Cell::Air => Some(0.0),
+        Cell::Drain => Some(0.0), // drain appears empty — water always flows in
         _ => None,
     }
 }
@@ -125,10 +128,12 @@ pub fn step_simulation(grid: &Grid) -> Vec<Cell> {
         };
     }
 
-    // Preserve spring cells — they are permanent, self-replenishing sources
+    // Preserve spring and drain cells — they are permanent fixtures
     for i in 0..new_cells.len() {
-        if matches!(grid.cells[i], Cell::Spring) {
-            new_cells[i] = Cell::Spring;
+        match grid.cells[i] {
+            Cell::Spring => new_cells[i] = Cell::Spring,
+            Cell::Drain => new_cells[i] = Cell::Drain,
+            _ => {}
         }
     }
 
@@ -189,9 +194,9 @@ pub fn build_depth_pressure(grid: &Grid) -> Vec<f32> {
                 }
                 Cell::Wall => {
                     depth[y * width + x] = 0.0;
-                    // immovable — don't modify water_below
+                    water_below.clear(); // walls block pressure from above
                 }
-                Cell::Air => {
+                Cell::Air | Cell::Drain => {
                     water_below.clear();
                     depth[y * width + x] = 0.0;
                 }
@@ -201,6 +206,51 @@ pub fn build_depth_pressure(grid: &Grid) -> Vec<f32> {
     depth
 }
 
+/// BFS from inlet (y=0) through connected non-wall cells.
+/// Returns distance-from-inlet for each cell (u32::MAX = unreachable).
+/// Objects should move toward HIGHER distance values (downstream).
+pub fn build_flow_distance(grid: &Grid) -> Vec<u32> {
+    let width = grid.width;
+    let height = grid.height;
+    let mut dist = vec![u32::MAX; width * height];
+    let mut queue = VecDeque::new();
+
+    // Seed from inlet row (y=0)
+    for x in 0..width {
+        if matches!(grid.cells[x], Cell::Water(_) | Cell::Spring) {
+            dist[x] = 0;
+            queue.push_back(x);
+        }
+    }
+
+    while let Some(idx) = queue.pop_front() {
+        let d = dist[idx];
+        let x = idx % width;
+        let y = idx / width;
+
+        for (ddx, ddy) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
+            let nx = x as isize + ddx;
+            let ny = y as isize + ddy;
+            if nx < 0 || ny < 0 || nx >= width as isize || ny >= height as isize {
+                continue;
+            }
+            let nidx = ny as usize * width + nx as usize;
+            if dist[nidx] <= d + 1 {
+                continue;
+            }
+            match grid.cells[nidx] {
+                Cell::Wall => {} // walls block flow path
+                _ => {
+                    dist[nidx] = d + 1;
+                    queue.push_back(nidx);
+                }
+            }
+        }
+    }
+
+    dist
+}
+
 pub fn step_objects(grid: &Grid) -> Vec<Cell> {
     let width = grid.width;
     let height = grid.height;
@@ -208,6 +258,10 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
     // Build depth-based pressure table so cells deeper in the water column
     // feel higher pressure regardless of local fill level equalisation.
     let depth = build_depth_pressure(grid);
+
+    // Flow distance: BFS distance from inlet. Objects move toward higher
+    // distance (downstream) instead of always pushing in +y.
+    let flow_dist = build_flow_distance(grid);
 
     // Pass 1: collect all intended moves without writing anything yet.
     let mut intents: Vec<MoveIntent> = Vec::new();
@@ -259,10 +313,51 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
             let horizontal_deadzone = avg_pressure * 0.1; // need >10% imbalance to move
             let x_stable = x_force.abs() < horizontal_deadzone;
 
-            let (dx, dy) = if net_y >= net_x {
-                (0isize, if net_y > threshold { 1isize } else { 0 })
+            // Use flow distance to determine downstream direction.
+            // This follows the river path around bends instead of always
+            // pushing in +y (which shoves objects into walls at turns).
+            let obj_fd = flow_dist[idx];
+            let mut downstream_dx = 0.0f32;
+            let mut downstream_dy = 0.0f32;
+            if obj_fd != u32::MAX {
+                for (ddx, ddy) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
+                    let fnx = x as isize + ddx;
+                    let fny = y as isize + ddy;
+                    if fnx < 0 || fny < 0 || fnx >= width as isize || fny >= height as isize {
+                        continue;
+                    }
+                    let fidx = fny as usize * width + fnx as usize;
+                    let nd = flow_dist[fidx];
+                    if nd != u32::MAX && nd > obj_fd {
+                        downstream_dx += ddx as f32;
+                        downstream_dy += ddy as f32;
+                    }
+                }
+            }
+            let has_flow = downstream_dx != 0.0 || downstream_dy != 0.0;
+
+            let (dx, dy) = if net_y >= net_x && net_y > threshold {
+                // Buoyancy is the dominant force — use flow direction if available
+                if has_flow {
+                    if downstream_dx.abs() >= downstream_dy.abs() {
+                        (downstream_dx.signum() as isize, 0isize)
+                    } else {
+                        (0isize, downstream_dy.signum() as isize)
+                    }
+                } else {
+                    (0isize, 1isize) // fallback: original +y behavior
+                }
+            } else if net_x > threshold && !x_stable {
+                (x_force.signum() as isize, 0isize)
+            } else if has_flow && (net_y > threshold || net_x > threshold) {
+                // Neither axis dominates but there's some force — follow flow
+                if downstream_dx.abs() >= downstream_dy.abs() {
+                    (downstream_dx.signum() as isize, 0isize)
+                } else {
+                    (0isize, downstream_dy.signum() as isize)
+                }
             } else {
-                (if net_x > threshold && !x_stable { x_force.signum() as isize } else { 0 }, 0isize)
+                (0isize, 0isize)
             };
 
             if dx == 0 && dy == 0 {
@@ -346,7 +441,7 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
 
         // Helper: returns true if the cell at `idx` blocks entry.
         let is_blocked = |idx: usize| -> bool {
-            matches!(new_cells[idx], Cell::Wall | Cell::Spring)
+            matches!(new_cells[idx], Cell::Wall | Cell::Spring | Cell::Drain)
                 || (matches!(new_cells[idx], Cell::Object(_)) && !moved_srcs.contains(&idx))
         };
 
