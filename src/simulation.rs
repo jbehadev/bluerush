@@ -251,10 +251,18 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
             let net_y = y_force;
 
             let threshold = 0.1;
+
+            // Anti-oscillation: require the horizontal pressure difference to be a
+            // meaningful fraction of the average pressure.  Without this, objects
+            // jitter left-right when pressure is nearly equal on both sides.
+            let avg_pressure = (p_left + p_right) * 0.5;
+            let horizontal_deadzone = avg_pressure * 0.1; // need >10% imbalance to move
+            let x_stable = x_force.abs() < horizontal_deadzone;
+
             let (dx, dy) = if net_y >= net_x {
                 (0isize, if net_y > threshold { 1isize } else { 0 })
             } else {
-                (if net_x > threshold { x_force.signum() as isize } else { 0 }, 0isize)
+                (if net_x > threshold && !x_stable { x_force.signum() as isize } else { 0 }, 0isize)
             };
 
             if dx == 0 && dy == 0 {

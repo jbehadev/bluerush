@@ -2,9 +2,11 @@ use crate::persistence;
 use crate::simulation::{
     Cell, Grid, MAX_WATER_KG, build_depth_pressure, step_objects, step_simulation,
 };
-use crate::textures::TextureAssets;
+use bevy::camera::ScalingMode;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
-use bevy::{color::palettes::css::*, prelude::*};
+use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
+use bevy::prelude::*;
+use std::f32::consts::FRAC_PI_2;
 
 #[derive(Message)]
 struct SaveRequested;
@@ -51,6 +53,8 @@ impl Plugin for GridPlugin {
                         handle_load,
                         poll_file_op,
                     ),
+                    camera_controls,
+                    draw_hover_cursor,
                 ),
             );
     }
@@ -69,11 +73,11 @@ pub struct GridConfig {
 }
 
 impl GridConfig {
-    fn offset_x(&self) -> f32 {
-        -(self.window_width / 2.0) + PANEL_WIDTH + (self.tile_size / 2.0)
+    fn grid_cols(&self) -> usize {
+        ((self.window_width - PANEL_WIDTH) / self.tile_size) as usize
     }
-    fn offset_y(&self) -> f32 {
-        -(self.window_height / 2.0) + (self.tile_size / 2.0)
+    fn grid_rows(&self) -> usize {
+        (self.window_height / self.tile_size) as usize
     }
 }
 
@@ -137,26 +141,132 @@ struct PendingFileOp {
     op: Option<persistence::PendingIo>,
 }
 
+#[derive(Resource)]
+struct CameraState {
+    focus: Vec3,
+    zoom: f32,
+    base_offset: Vec3,
+}
+
 #[derive(Component)]
 struct Tile {
     x: usize,
     y: usize,
 }
 
-#[derive(Component)]
-struct TileBorder {
-    x: usize,
-    y: usize,
+const WATER_PALETTE_SIZE: usize = 32;
+const HEATMAP_PALETTE_SIZE: usize = 64;
+/// Height multiplier so cubes are visible relative to grid width
+const CUBE_HEIGHT: f32 = 5.0;
+
+#[derive(Resource)]
+struct MaterialPalette {
+    air: Handle<StandardMaterial>,
+    wall: Handle<StandardMaterial>,
+    spring: Handle<StandardMaterial>,
+    water: Vec<Handle<StandardMaterial>>,
+    objects: Vec<Handle<StandardMaterial>>,
+    heatmap: Vec<Handle<StandardMaterial>>,
+    heatmap_zero: Handle<StandardMaterial>,
 }
 
-fn setup(mut commands: Commands, config: Res<GridConfig>) {
-    let tile_size = config.tile_size;
-    let width = ((config.window_width - PANEL_WIDTH) / tile_size) as usize;
-    let height = (config.window_height / tile_size) as usize;
-    let offset_x = config.offset_x();
-    let offset_y = config.offset_y();
+fn build_palette(materials: &mut Assets<StandardMaterial>) -> MaterialPalette {
+    let air = materials.add(Color::srgb(0.34, 0.49, 0.27));
+    let wall = materials.add(Color::srgb(0.1, 0.1, 0.1));
+    let spring = materials.add(Color::srgb(0.0, 0.8, 0.7));
 
-    commands.spawn(Camera2d);
+    let water: Vec<_> = (0..WATER_PALETTE_SIZE)
+        .map(|i| {
+            let fill = i as f32 / (WATER_PALETTE_SIZE - 1) as f32;
+            materials.add(Color::srgb(1.0 - fill, 1.0 - fill, 1.0))
+        })
+        .collect();
+
+    let object_grays: &[f32] = &[0.80, 0.65, 0.42, 0.30, 0.10];
+    let objects: Vec<_> = object_grays
+        .iter()
+        .map(|&g| materials.add(Color::srgb(g, g, g)))
+        .collect();
+
+    let heatmap: Vec<_> = (0..HEATMAP_PALETTE_SIZE)
+        .map(|i| {
+            let t = (i as f32 + 1.0) / HEATMAP_PALETTE_SIZE as f32;
+            materials.add(pressure_color(t))
+        })
+        .collect();
+    let heatmap_zero = materials.add(Color::WHITE);
+
+    MaterialPalette {
+        air,
+        wall,
+        spring,
+        water,
+        objects,
+        heatmap,
+        heatmap_zero,
+    }
+}
+
+fn setup(
+    mut commands: Commands,
+    config: Res<GridConfig>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut config_store: ResMut<GizmoConfigStore>,
+) {
+    let width = config.grid_cols();
+    let height = config.grid_rows();
+
+    // 3D Camera — orthographic isometric view looking down at the grid
+    // Shift camera left so the grid centers in the area right of the toolbar
+    let panel_frac = PANEL_WIDTH / config.window_width;
+    let vis_width = width as f32 + 4.0;
+    let aspect_ratio = 16.0 / 9.0; // Your desired aspect ratio
+    let vis_height = vis_width / aspect_ratio; // Calculate height
+    let panel_offset = panel_frac * vis_width / 2.0;
+    let center_x = width as f32 / 2.0 - panel_offset;
+    let center_z = height as f32 / 2.0;
+    let grid_extent = (width as f32 / 2.0).max(center_z);
+
+    let focus = Vec3::new(center_x, 0.0, center_z);
+    let cam_pos = Vec3::new(
+        center_x + grid_extent * 0.5,
+        grid_extent * 1.2,
+        center_z + grid_extent * 0.5,
+    );
+    let base_offset = cam_pos - focus;
+
+    commands.spawn((
+        Camera3d::default(),
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::FixedHorizontal {
+                viewport_width: vis_width * 1.5, // Adjust as needed
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_translation(cam_pos).looking_at(focus, Vec3::Y),
+    ));
+
+    commands.insert_resource(CameraState {
+        focus,
+        zoom: 1.0,
+        base_offset,
+    });
+
+    // Directional light (sun) for shadows and depth
+    commands.spawn((
+        DirectionalLight {
+            shadows_enabled: true,
+            illuminance: 12000.0,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.4, 0.0)),
+    ));
+
+    // Configure gizmos to always render on top of geometry
+    config_store.config_mut::<DefaultGizmoConfigGroup>().0.depth_bias = -1.0;
+    config_store.config_mut::<DefaultGizmoConfigGroup>().0.line.width = 2.0;
+
     commands.insert_resource(GameState {
         water_flow: false,
         show_pressure: false,
@@ -167,24 +277,25 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
     commands.insert_resource(SelectedTool::Block(200.0));
     commands.insert_resource(Grid::init(width, height));
 
-    let border_inner = (tile_size - 2.0).max(1.0);
+    // Build shared material palette (enables draw-call batching)
+    let palette = build_palette(&mut materials);
+
+    // Shared cube mesh for all tiles
+    let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+
     for row in 0..height {
         for col in 0..width {
-            let x = offset_x + (col as f32 * tile_size);
-            let y = offset_y + (row as f32 * tile_size);
             commands.spawn((
-                Sprite::from_color(BLUE, Vec2::splat(tile_size)),
-                Transform::from_xyz(x, y, 0.0),
+                Mesh3d(cube_mesh.clone()),
+                MeshMaterial3d(palette.air.clone()),
+                Transform::from_xyz(col as f32, 0.05, row as f32)
+                    .with_scale(Vec3::new(1.0, 0.1, 1.0)),
                 Tile { x: col, y: row },
-            ));
-            // Inner sprite sits 1px inside the outer tile; used for heatmap object borders
-            commands.spawn((
-                Sprite::from_color(Color::NONE, Vec2::splat(border_inner)),
-                Transform::from_xyz(x, y, 0.1),
-                TileBorder { x: col, y: row },
             ));
         }
     }
+
+    commands.insert_resource(palette);
 
     // Left toolbar — SimCity-style icon panel
     commands
@@ -207,7 +318,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
             // Section label
             parent.spawn((
                 Text::new("OBJECTS"),
-                TextFont { font_size: 9.0, ..default() },
+                TextFont {
+                    font_size: 9.0,
+                    ..default()
+                },
                 TextColor(Color::srgb(0.55, 0.55, 0.60)),
             ));
 
@@ -225,9 +339,9 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                 .with_children(|grid| {
                     // Weight icon buttons
                     let weights: &[(f32, f32, f32)] = &[
-                        (200.0,  14.0, 0.92),
-                        (500.0,  20.0, 0.74),
-                        (1000.0, 26.0, 0.52),
+                        (200.0, 14.0, 0.80),
+                        (500.0, 20.0, 0.65),
+                        (1000.0, 26.0, 0.42),
                         (2000.0, 32.0, 0.30),
                         (5000.0, 38.0, 0.10),
                     ];
@@ -260,20 +374,23 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                                 justify_content: JustifyContent::Center,
                                 ..default()
                             },))
-                            .with_children(|icon| {
-                                icon.spawn((
-                                    Node {
-                                        width: Val::Px(icon_size),
-                                        height: Val::Px(icon_size),
-                                        ..default()
-                                    },
-                                    BackgroundColor(Color::srgb(gray, gray, gray)),
-                                ));
-                            });
+                                .with_children(|icon| {
+                                    icon.spawn((
+                                        Node {
+                                            width: Val::Px(icon_size),
+                                            height: Val::Px(icon_size),
+                                            ..default()
+                                        },
+                                        BackgroundColor(Color::srgb(gray, gray, gray)),
+                                    ));
+                                });
                             // Label
                             btn.spawn((
                                 Text::new(format!("{}kg", weight as u32)),
-                                TextFont { font_size: 9.0, ..default() },
+                                TextFont {
+                                    font_size: 9.0,
+                                    ..default()
+                                },
                                 TextColor(Color::WHITE),
                             ));
                         });
@@ -302,19 +419,22 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                             justify_content: JustifyContent::Center,
                             ..default()
                         },))
-                        .with_children(|icon| {
-                            icon.spawn((
-                                Node {
-                                    width: Val::Px(30.0),
-                                    height: Val::Px(14.0),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgb(0.95, 0.70, 0.70)),
-                            ));
-                        });
+                            .with_children(|icon| {
+                                icon.spawn((
+                                    Node {
+                                        width: Val::Px(30.0),
+                                        height: Val::Px(14.0),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgb(0.95, 0.70, 0.70)),
+                                ));
+                            });
                         btn.spawn((
                             Text::new("Erase"),
-                            TextFont { font_size: 9.0, ..default() },
+                            TextFont {
+                                font_size: 9.0,
+                                ..default()
+                            },
                             TextColor(Color::WHITE),
                         ));
                     });
@@ -342,19 +462,22 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                             justify_content: JustifyContent::Center,
                             ..default()
                         },))
-                        .with_children(|icon| {
-                            icon.spawn((
-                                Node {
-                                    width: Val::Px(14.0),
-                                    height: Val::Px(14.0),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgb(0.0, 0.8, 0.7)),
-                            ));
-                        });
+                            .with_children(|icon| {
+                                icon.spawn((
+                                    Node {
+                                        width: Val::Px(14.0),
+                                        height: Val::Px(14.0),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgb(0.0, 0.8, 0.7)),
+                                ));
+                            });
                         btn.spawn((
                             Text::new("Spring"),
-                            TextFont { font_size: 9.0, ..default() },
+                            TextFont {
+                                font_size: 9.0,
+                                ..default()
+                            },
                             TextColor(Color::WHITE),
                         ));
                     });
@@ -363,7 +486,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
             // BRUSH section
             parent.spawn((
                 Text::new("BRUSH"),
-                TextFont { font_size: 9.0, ..default() },
+                TextFont {
+                    font_size: 9.0,
+                    ..default()
+                },
                 TextColor(Color::srgb(0.55, 0.55, 0.60)),
             ));
 
@@ -391,14 +517,20 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                     .with_children(|btn| {
                         btn.spawn((
                             Text::new("-"),
-                            TextFont { font_size: 16.0, ..default() },
+                            TextFont {
+                                font_size: 16.0,
+                                ..default()
+                            },
                             TextColor(Color::WHITE),
                         ));
                     });
 
                     row.spawn((
                         Text::new("1"),
-                        TextFont { font_size: 14.0, ..default() },
+                        TextFont {
+                            font_size: 14.0,
+                            ..default()
+                        },
                         TextColor(Color::WHITE),
                         BrushLabel,
                     ));
@@ -418,7 +550,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                     .with_children(|btn| {
                         btn.spawn((
                             Text::new("+"),
-                            TextFont { font_size: 16.0, ..default() },
+                            TextFont {
+                                font_size: 16.0,
+                                ..default()
+                            },
                             TextColor(Color::WHITE),
                         ));
                     });
@@ -438,7 +573,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
             // FLOW section label
             parent.spawn((
                 Text::new("FLOW"),
-                TextFont { font_size: 9.0, ..default() },
+                TextFont {
+                    font_size: 9.0,
+                    ..default()
+                },
                 TextColor(Color::srgb(0.55, 0.55, 0.60)),
             ));
 
@@ -459,7 +597,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                 .with_children(|btn| {
                     btn.spawn((
                         Text::new("Inlet"),
-                        TextFont { font_size: 12.0, ..default() },
+                        TextFont {
+                            font_size: 12.0,
+                            ..default()
+                        },
                         TextColor(Color::WHITE),
                     ));
                 });
@@ -481,7 +622,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                 .with_children(|btn| {
                     btn.spawn((
                         Text::new("Pressure"),
-                        TextFont { font_size: 12.0, ..default() },
+                        TextFont {
+                            font_size: 12.0,
+                            ..default()
+                        },
                         TextColor(Color::WHITE),
                     ));
                 });
@@ -514,7 +658,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                 .with_children(|btn| {
                     btn.spawn((
                         Text::new("Reset"),
-                        TextFont { font_size: 12.0, ..default() },
+                        TextFont {
+                            font_size: 12.0,
+                            ..default()
+                        },
                         TextColor(Color::WHITE),
                     ));
                 });
@@ -546,7 +693,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                     .with_children(|btn| {
                         btn.spawn((
                             Text::new("-"),
-                            TextFont { font_size: 16.0, ..default() },
+                            TextFont {
+                                font_size: 16.0,
+                                ..default()
+                            },
                             TextColor(Color::WHITE),
                         ));
                     });
@@ -554,7 +704,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                     // Speed label (center)
                     row.spawn((
                         Text::new("x1"),
-                        TextFont { font_size: 14.0, ..default() },
+                        TextFont {
+                            font_size: 14.0,
+                            ..default()
+                        },
                         TextColor(Color::WHITE),
                         SpeedLabel,
                     ));
@@ -575,7 +728,10 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
                     .with_children(|btn| {
                         btn.spawn((
                             Text::new("+"),
-                            TextFont { font_size: 16.0, ..default() },
+                            TextFont {
+                                font_size: 16.0,
+                                ..default()
+                            },
                             TextColor(Color::WHITE),
                         ));
                     });
@@ -612,62 +768,47 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
 
 fn render_grid(
     grid: Res<Grid>,
-    mut tile_query: Query<(&Tile, &mut Sprite), Without<TileBorder>>,
-    mut border_query: Query<(&TileBorder, &mut Sprite), Without<Tile>>,
-    textures: Res<TextureAssets>,
-    mut state: ResMut<GameState>,
-    time: Res<Time>,
+    mut tile_query: Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
+    palette: Res<MaterialPalette>,
+    state: Res<GameState>,
 ) {
     if state.show_pressure {
-        render_heat_grid(&grid, &mut tile_query, &mut border_query);
+        render_heat_grid_3d(&grid, &mut tile_query, &palette);
         return;
     }
-    // Only clear border sprites when switching back from heatmap mode
-    if state.is_changed() {
-        for (_, mut sprite) in &mut border_query {
-            sprite.color = Color::NONE;
-        }
-    }
-    // Switch froth frames every 0.4s — gives the illusion of churning bubbles.
-    let froth = if (time.elapsed_secs() % 0.8) < 0.4 {
-        &textures.froth_frame1
-    } else {
-        &textures.froth_frame2
-    };
-    for (tile, mut sprite) in &mut tile_query {
-        match grid.cells[tile.y * grid.width + tile.x] {
-            Cell::Air => {
-                sprite.image = Handle::default();
-                sprite.color = WHITE.into();
-            }
-            Cell::Water(kg) if kg < MAX_WATER_KG * 0.03 => {
-                sprite.image = froth.clone();
-                sprite.color = WHITE.into();
-            }
+    for (tile, mut transform, mut mat) in &mut tile_query {
+        let cell = &grid.cells[tile.y * grid.width + tile.x];
+        let (h, handle) = match cell {
+            Cell::Air => (0.1, &palette.air),
             Cell::Water(kg) => {
-                sprite.image = Handle::default();
                 let fill = kg / MAX_WATER_KG;
-                sprite.color = Color::srgb(1.0 - fill, 1.0 - fill, 1.0);
+                let idx = (fill * (WATER_PALETTE_SIZE - 1) as f32).round() as usize;
+                (
+                    0.1 + fill * 0.9,
+                    &palette.water[idx.min(WATER_PALETTE_SIZE - 1)],
+                )
             }
-            Cell::Wall => {
-                sprite.image = Handle::default();
-                sprite.color = Color::srgb(0.1, 0.1, 0.1);
-            }
-            Cell::Spring => {
-                sprite.image = Handle::default();
-                sprite.color = Color::srgb(0.0, 0.8, 0.7); // teal
-            }
+            Cell::Wall => (1.0, &palette.wall),
+            Cell::Spring => (1.0, &palette.spring),
             Cell::Object(w) => {
-                sprite.image = Handle::default();
-                // Match toolbar icon shades: 200kg = lightest, 5000kg = darkest
-                let brightness = if w <= 200.0 { 0.92 }
-                    else if w <= 500.0 { 0.74 }
-                    else if w <= 1000.0 { 0.52 }
-                    else if w <= 2000.0 { 0.30 }
-                    else { 0.10 };
-                sprite.color = Color::srgb(brightness, brightness, brightness);
+                let idx = if *w <= 200.0 {
+                    0
+                } else if *w <= 500.0 {
+                    1
+                } else if *w <= 1000.0 {
+                    2
+                } else if *w <= 2000.0 {
+                    3
+                } else {
+                    4
+                };
+                (0.8, &palette.objects[idx])
             }
-        }
+        };
+        let scaled = h * CUBE_HEIGHT;
+        transform.scale.y = scaled;
+        transform.translation.y = scaled / 2.0;
+        mat.0 = handle.clone();
     }
 }
 
@@ -690,36 +831,36 @@ fn pressure_color(t: f32) -> Color {
     Color::srgb(r, g, b)
 }
 
-fn render_heat_grid(
-    grid: &Res<Grid>,
-    tile_query: &mut Query<(&Tile, &mut Sprite), Without<TileBorder>>,
-    border_query: &mut Query<(&TileBorder, &mut Sprite), Without<Tile>>,
+fn render_heat_grid_3d(
+    grid: &Grid,
+    tile_query: &mut Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
+    palette: &MaterialPalette,
 ) {
     let depth = build_depth_pressure(grid);
     let max = depth.iter().cloned().fold(1.0f32, f32::max);
 
-    for (tile, mut sprite) in tile_query.iter_mut() {
-        sprite.image = Handle::default();
+    for (tile, mut transform, mut mat) in tile_query.iter_mut() {
         let idx = tile.y * grid.width + tile.x;
-        if matches!(grid.cells[idx], Cell::Object(_)) {
-            // Outer sprite = black border ring
-            sprite.color = Color::BLACK;
+        let val = depth[idx];
+        let handle = if val > 0.0 {
+            let t = val / max;
+            let i = (t * (HEATMAP_PALETTE_SIZE - 1) as f32).round() as usize;
+            &palette.heatmap[i.min(HEATMAP_PALETTE_SIZE - 1)]
         } else {
-            let val = depth[idx];
-            sprite.color = if val > 0.0 { pressure_color(val / max) } else { WHITE.into() };
-        }
-    }
+            &palette.heatmap_zero
+        };
 
-    for (border, mut sprite) in border_query.iter_mut() {
-        sprite.image = Handle::default();
-        let idx = border.y * grid.width + border.x;
-        if matches!(grid.cells[idx], Cell::Object(_)) {
-            // Inner sprite = pressure color showing through the object
-            let val = depth[idx];
-            sprite.color = if val > 0.0 { pressure_color(val / max) } else { WHITE.into() };
-        } else {
-            sprite.color = Color::NONE;
-        }
+        let h = match &grid.cells[idx] {
+            Cell::Air => 0.1,
+            Cell::Water(kg) => 0.1 + (kg / MAX_WATER_KG) * 0.9,
+            Cell::Wall => 1.0,
+            Cell::Spring => 1.0,
+            Cell::Object(_) => 0.8,
+        };
+        let scaled = h * CUBE_HEIGHT;
+        transform.scale.y = scaled;
+        transform.translation.y = scaled / 2.0;
+        mat.0 = handle.clone();
     }
 }
 
@@ -757,7 +898,10 @@ fn handle_spring_button(
 }
 
 fn update_tool_buttons(
-    mut weight_query: Query<(&WeightButton, &mut BackgroundColor), (Without<EraserButton>, Without<SpringButton>)>,
+    mut weight_query: Query<
+        (&WeightButton, &mut BackgroundColor),
+        (Without<EraserButton>, Without<SpringButton>),
+    >,
     mut eraser_query: Query<&mut BackgroundColor, (With<EraserButton>, Without<SpringButton>)>,
     mut spring_query: Query<&mut BackgroundColor, With<SpringButton>>,
     selected: Res<SelectedTool>,
@@ -891,25 +1035,123 @@ fn animate_gate(mut grid: ResMut<Grid>, mut state: ResMut<GameState>) {
 }
 
 /// Converts a cursor window position to a grid cell, or None if it's in the toolbar/OOB.
-/// Uses the camera's actual viewport to get correct world coordinates at any resolution/DPI.
+/// Casts a ray from the 3D camera through the cursor onto the Y=0 ground plane.
 fn cursor_to_grid(
     cursor_pos: Vec2,
     camera: &Camera,
     camera_transform: &GlobalTransform,
-    config: &GridConfig,
 ) -> Option<(usize, usize)> {
-    // Reject anything inside the left toolbar panel (window pixels, no math needed)
+    // Reject anything inside the left toolbar panel (window pixels)
     if cursor_pos.x < PANEL_WIDTH {
         return None;
     }
-    let world = camera.viewport_to_world_2d(camera_transform, cursor_pos).ok()?;
-    // offset_x/y is the world position of tile (0, 0) center
-    let gx = (world.x - config.offset_x()) / config.tile_size + 0.5;
-    let gy = (world.y - config.offset_y()) / config.tile_size + 0.5;
-    if gx < 0.0 || gy < 0.0 {
+    let ray = camera
+        .viewport_to_world(camera_transform, cursor_pos)
+        .ok()?;
+    // Intersect ray with Y=0 ground plane
+    let denom = ray.direction.y;
+    if denom.abs() < 1e-6 {
         return None;
     }
-    Some((gx as usize, gy as usize))
+    let t = -ray.origin.y / denom;
+    if t < 0.0 {
+        return None;
+    }
+    let hit = ray.origin + t * *ray.direction;
+    // 1 world unit = 1 tile; tile centers at integer coords
+    let gx = (hit.x + 0.5).floor();
+    let gz = (hit.z + 0.5).floor();
+    if gx < 0.0 || gz < 0.0 {
+        return None;
+    }
+    Some((gx as usize, gz as usize))
+}
+
+fn camera_controls(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut scroll_events: MessageReader<MouseWheel>,
+    accumulated_motion: Res<AccumulatedMouseMotion>,
+    windows: Query<&Window>,
+    mut camera_q: Query<(&mut Transform, &mut Projection)>,
+    mut cam_state: ResMut<CameraState>,
+    config: Res<GridConfig>,
+) {
+    let Ok(window) = windows.single() else { return };
+    let Ok((mut cam_transform, mut projection)) = camera_q.single_mut() else {
+        return;
+    };
+    let mut changed = false;
+
+    // Only interact when cursor is over the 3D area (not the toolbar)
+    let cursor_over_grid = window
+        .cursor_position()
+        .is_some_and(|pos| pos.x >= PANEL_WIDTH);
+
+    // --- Zoom via scroll wheel ---
+    // Use multiplicative zoom for smooth feel; different sensitivity per scroll unit.
+    // Mac trackpad/Magic Mouse sends Pixel units with large deltas,
+    // regular mice send Line units with small deltas.
+    for ev in scroll_events.read() {
+        if cursor_over_grid {
+            let scroll_amount = match ev.unit {
+                MouseScrollUnit::Line => ev.y * 0.15,
+                MouseScrollUnit::Pixel => ev.y * 0.002,
+            };
+            // Multiplicative: zoom *= (1 + scroll). Feels proportional at any zoom level.
+            cam_state.zoom *= 1.0 - scroll_amount;
+            cam_state.zoom = cam_state.zoom.clamp(0.2, 5.0);
+            changed = true;
+        }
+    }
+
+    // --- Pan via right mouse drag ---
+    if mouse.pressed(MouseButton::Right)
+        && cursor_over_grid
+        && accumulated_motion.delta != Vec2::ZERO
+    {
+        let Projection::Orthographic(ref ortho) = *projection else {
+            return;
+        };
+        // Convert pixel delta to world units
+        let pixels_to_world = (ortho.area.max.x - ortho.area.min.x) / window.width();
+
+        // Camera right/forward projected onto XZ ground plane
+        let right = cam_transform.right();
+        let right_xz = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
+        let forward = cam_transform.forward();
+        let forward_xz = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+
+        let motion = accumulated_motion.delta;
+        // Dragging right moves the view left (world moves opposite to drag)
+        let pan = (-motion.x * right_xz + motion.y * forward_xz) * pixels_to_world;
+        cam_state.focus += pan;
+        changed = true;
+    }
+
+    // --- Reset on Home key ---
+    if keyboard.just_pressed(KeyCode::Home) {
+        let width = config.grid_cols();
+        let height = config.grid_rows();
+        let panel_frac = PANEL_WIDTH / config.window_width;
+        let vis_width = width as f32 + 4.0;
+        let panel_offset = panel_frac * vis_width / 2.0;
+        let center_x = width as f32 / 2.0 - panel_offset;
+        let center_z = height as f32 / 2.0;
+        cam_state.focus = Vec3::new(center_x, 0.0, center_z);
+        cam_state.zoom = 1.0;
+        changed = true;
+    }
+
+    // --- Apply camera state ---
+    if changed {
+        if let Projection::Orthographic(ref mut ortho) = *projection {
+            ortho.scale = cam_state.zoom;
+        }
+        let new_pos = cam_state.focus + cam_state.base_offset;
+        *cam_transform =
+            Transform::from_translation(new_pos).looking_at(cam_state.focus, Vec3::Y);
+    }
 }
 
 fn handle_input(
@@ -920,36 +1162,44 @@ fn handle_input(
     mut grid: ResMut<Grid>,
     mut state: ResMut<GameState>,
     mut selected: ResMut<SelectedTool>,
-    config: Res<GridConfig>,
     mut save_events: MessageWriter<SaveRequested>,
     mut load_events: MessageWriter<LoadRequested>,
 ) {
     let Ok(window) = windows.single() else { return };
-    let Ok((camera, camera_transform)) = camera_q.single() else { return };
+    let Ok((camera, camera_transform)) = camera_q.single() else {
+        return;
+    };
 
-    let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight)
-        || keyboard.pressed(KeyCode::SuperLeft) || keyboard.pressed(KeyCode::SuperRight);
+    let ctrl = keyboard.pressed(KeyCode::ControlLeft)
+        || keyboard.pressed(KeyCode::ControlRight)
+        || keyboard.pressed(KeyCode::SuperLeft)
+        || keyboard.pressed(KeyCode::SuperRight);
 
     if mouse.pressed(MouseButton::Left) {
         if let Some(cursor_pos) = window.cursor_position() {
-            if let Some((cx, cy)) = cursor_to_grid(cursor_pos, camera, camera_transform, &config) {
+            if let Some((cx, cy)) = cursor_to_grid(cursor_pos, camera, camera_transform) {
                 let r = state.brush_radius as usize;
                 for dy in 0..=(r * 2) {
                     for dx in 0..=(r * 2) {
                         let bx = (cx + dx).saturating_sub(r);
                         let by = (cy + dy).saturating_sub(r);
-                        if bx < grid.width && by < grid.height
+                        if bx < grid.width
+                            && by < grid.height
                             && !matches!(grid.get_cell(bx, by), Cell::Wall)
                         {
                             match *selected {
                                 // Only place a block if the cell isn't already an Object.
                                 // This prevents holding the mouse over a floating block from
                                 // fighting the physics by re-placing it every frame.
-                                SelectedTool::Block(w) if !matches!(grid.get_cell(bx, by), Cell::Object(_)) => {
+                                SelectedTool::Block(w)
+                                    if !matches!(grid.get_cell(bx, by), Cell::Object(_)) =>
+                                {
                                     grid.set_cell(bx, by, Cell::Object(w));
                                 }
-                                SelectedTool::Eraser  => grid.set_cell(bx, by, Cell::Air),
-                                SelectedTool::Spring if !matches!(grid.get_cell(bx, by), Cell::Spring) => {
+                                SelectedTool::Eraser => grid.set_cell(bx, by, Cell::Air),
+                                SelectedTool::Spring
+                                    if !matches!(grid.get_cell(bx, by), Cell::Spring) =>
+                                {
                                     grid.set_cell(bx, by, Cell::Spring);
                                 }
                                 _ => {}
@@ -960,9 +1210,10 @@ fn handle_input(
             }
         }
     }
-    if mouse.just_pressed(MouseButton::Right) {
+    let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    if mouse.just_pressed(MouseButton::Right) && shift {
         if let Some(cursor_pos) = window.cursor_position() {
-            if let Some((grid_x, grid_y)) = cursor_to_grid(cursor_pos, camera, camera_transform, &config) {
+            if let Some((grid_x, grid_y)) = cursor_to_grid(cursor_pos, camera, camera_transform) {
                 if grid_x < grid.width && grid_y < grid.height {
                     println!(
                         "{grid_x}, {grid_y}: {:?} pressure: {}",
@@ -1047,10 +1298,7 @@ fn handle_speed_buttons(
     }
 }
 
-fn update_speed_label(
-    mut label_query: Query<&mut Text, With<SpeedLabel>>,
-    state: Res<GameState>,
-) {
+fn update_speed_label(mut label_query: Query<&mut Text, With<SpeedLabel>>, state: Res<GameState>) {
     if !state.is_changed() {
         return;
     }
@@ -1076,10 +1324,7 @@ fn handle_brush_buttons(
     }
 }
 
-fn update_brush_label(
-    mut label_query: Query<&mut Text, With<BrushLabel>>,
-    state: Res<GameState>,
-) {
+fn update_brush_label(mut label_query: Query<&mut Text, With<BrushLabel>>, state: Res<GameState>) {
     if !state.is_changed() {
         return;
     }
@@ -1103,7 +1348,13 @@ fn update_status(
     let water_kg: f32 = grid
         .cells
         .iter()
-        .filter_map(|c| if let Cell::Water(kg) = c { Some(*kg) } else { None })
+        .filter_map(|c| {
+            if let Cell::Water(kg) = c {
+                Some(*kg)
+            } else {
+                None
+            }
+        })
         .sum();
 
     let water_str = if water_kg >= 1_000_000.0 {
@@ -1222,5 +1473,44 @@ fn poll_file_op(
     };
     if done {
         pending.op = None;
+    }
+}
+
+fn draw_hover_cursor(
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform)>,
+    grid: Res<Grid>,
+    state: Res<GameState>,
+    mut gizmos: Gizmos,
+) {
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera_q.single() else {
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+    let Some((cx, cy)) = cursor_to_grid(cursor_pos, camera, camera_transform) else {
+        return;
+    };
+
+    let r = state.brush_radius as usize;
+    // Rotation to lay the rect flat on the XZ ground plane
+    let rotation = Quat::from_rotation_x(-FRAC_PI_2);
+    let color = Color::srgba(1.0, 1.0, 0.0, 0.9);
+
+    for dy in 0..=(r * 2) {
+        for dx in 0..=(r * 2) {
+            let bx = (cx + dx).saturating_sub(r);
+            let by = (cy + dy).saturating_sub(r);
+            if bx < grid.width && by < grid.height {
+                let center = Vec3::new(bx as f32, 0.3, by as f32);
+                gizmos.rect(
+                    Isometry3d::new(center, rotation),
+                    Vec2::splat(1.0),
+                    color,
+                );
+            }
+        }
     }
 }

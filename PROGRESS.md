@@ -122,12 +122,33 @@ src/
 - **Bottom UI panel** — dark bar with 200 kg / 500 kg / 1000 kg buttons; selected button highlighted in blue
 - **`SelectedWeight` resource** — tracks active weight; `handle_input` uses it when placing objects
 
-## Where We Left Off
-UI panel with weight selection is working. Grid shrunk by PANEL_HEIGHT to make room.
+### Session 8–10 (3D Rendering Overhaul)
+- **3D isometric view** — replaced 2D sprite rendering with 3D cubes (`Cuboid`, `Mesh3d`, `MeshMaterial3d`) viewed from an orthographic isometric camera (`Camera3d` + `OrthographicProjection`)
+- **Material palette** — `MaterialPalette` resource pre-creates `StandardMaterial` handles for all cell types (air, wall, spring, water gradient, object weights, heatmap); enables draw-call batching
+- **Dynamic tile height** — `render_grid` sets `transform.scale.y` and `transform.translation.y` based on cell type; water height reflects fill level, walls/springs are full height
+- **Camera controls** — mouse scroll to zoom, middle-click drag to pan; camera stays focused on grid center with adjustable offset
+- **Heatmap 3D rendering** — `render_heat_grid_3d` uses a rainbow pressure color ramp with distinct material palette
+- **Anti-oscillation physics** — horizontal deadzone in `step_objects` prevents objects from jittering left-right when pressure is nearly balanced (requires >10% imbalance to move)
+- **Brush size labels** — `SpeedLabel` and `BrushLabel` text components update dynamically
+- **Hover cursor gizmo** — `draw_hover_cursor` system uses Bevy `Gizmos` to draw yellow wireframe rectangles over hovered cells; respects brush radius; `depth_bias: -1.0` ensures visibility over all geometry
+- **Save/load persistence** — `Cmd+S` / `Cmd+O` with native file dialogs via `rfd` crate; grid serialized/deserialized with `serde`
 
-`hold_the_line` test still failing (pre-existing issue from Session 6).
+## Current File Structure
+```
+src/
+  main.rs        — app setup, registers TexturesPlugin + GridPlugin
+  grid.rs        — GridPlugin, all UI/rendering/input systems, 3D camera, gizmos
+  simulation.rs  — Cell/Grid types, step_simulation, step_objects, build_depth_pressure
+  textures.rs    — TexturesPlugin, TextureAssets resource, programmatic froth textures
+  persistence.rs — save/load grid to JSON files
+```
+
+## Where We Left Off
+3D isometric rendering is fully working with material palette, camera controls, hover cursor gizmo, and save/load. Anti-oscillation fix applied to object physics.
 
 ## What Comes Next
-- **Fix `build_depth_pressure`** — include the cell's own fill in its depth value, or rethink the pressure model so water directly below an object contributes to upward force
-- **`hold_the_line` test should pass** after the fix
-- **`pressure` field on `MoveIntent`** — still unused, dead code warning pending
+- **Water rendering polish** — animated water surface, transparency, or wave effects
+- **Object interaction** — dragging placed objects, object-to-object collision
+- **Sound effects** — water flow, object placement, splash sounds
+- **Level system** — predefined challenges with win conditions
+- **Performance** — profile with large grids, consider chunk-based updates
