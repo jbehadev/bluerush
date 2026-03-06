@@ -1,14 +1,14 @@
 use bevy::prelude::*;
 
-use crate::grid::{GameState, GridConfig, PANEL_WIDTH, SelectedTool};
-use crate::simulation::{Cell, Grid, MAX_WATER_KG, build_depth_pressure};
+use crate::grid::{GameState, GridConfig, PANEL_WIDTH, SelectedTool, ViewMode};
+use crate::simulation::{Cell, Grid, MAX_WATER_KG, build_depth_pressure, build_flow_distance};
 
 pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_render)
-            .add_systems(Update, (render_grid, draw_hover_cursor));
+            .add_systems(Update, (render_grid, draw_hover_cursor, draw_flow_arrows));
     }
 }
 
@@ -152,9 +152,9 @@ fn render_grid(
     grid: Res<Grid>,
     mut tile_query: Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
     palette: Res<MaterialPalette>,
-    state: Res<GameState>,
+    view_mode: Res<ViewMode>,
 ) {
-    if state.show_pressure {
+    if *view_mode == ViewMode::Pressure {
         render_heat_grid_3d(&grid, &mut tile_query, &palette);
         return;
     }
@@ -294,6 +294,160 @@ pub fn find_cursor_cell(
         return None;
     }
     Some((gx as usize, gz as usize))
+}
+
+/// For a hypothetical block of `weight` at (x, y), returns the predicted
+/// movement direction (dx, dy) and the net pushing pressure, or None if
+/// the block would not move.
+fn compute_arrow_info(
+    grid: &Grid,
+    depth: &[f32],
+    flow_dist: &[u32],
+    x: usize,
+    y: usize,
+    weight: f32,
+) -> Option<(isize, isize, f32)> {
+    let width = grid.width;
+    let height = grid.height;
+    let idx = y * width + x;
+
+    // Horizontal pressure from adjacent water cells
+    let p_left = if x > 0 {
+        match &grid.cells[y * width + (x - 1)] {
+            Cell::Water(_) => depth[y * width + (x - 1)],
+            _ => 0.0,
+        }
+    } else {
+        0.0
+    };
+    let p_right = if x < width - 1 {
+        match &grid.cells[y * width + (x + 1)] {
+            Cell::Water(_) => depth[y * width + (x + 1)],
+            _ => 0.0,
+        }
+    } else {
+        0.0
+    };
+    let x_force = p_left - p_right;
+
+    // Raw upward pressure at this cell (before subtracting object weight)
+    let raw_pressure = match &grid.cells[idx] {
+        Cell::Water(_) | Cell::Spring => depth[idx],
+        // depth[] for existing objects had weight subtracted — recover it
+        Cell::Object(w) => depth[idx] + w,
+        Cell::Air | Cell::Drain => {
+            // No water column here; use max of adjacent water pressures as a proxy
+            let p_below = if y > 0 {
+                match &grid.cells[(y - 1) * width + x] {
+                    Cell::Water(_) => depth[(y - 1) * width + x],
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            };
+            p_left.max(p_right).max(p_below)
+        }
+        Cell::Wall => return None,
+    };
+
+    let net_y = (raw_pressure - weight).max(0.0);
+    let net_x = (x_force.abs() - weight).max(0.0);
+    let avg_pressure = (p_left + p_right) * 0.5;
+    let x_stable = x_force.abs() < avg_pressure * 0.1;
+
+    // Downstream direction from flow BFS
+    let obj_fd = flow_dist[idx];
+    let mut downstream_dx = 0.0f32;
+    let mut downstream_dy = 0.0f32;
+    if obj_fd != u32::MAX {
+        for (ddx, ddy) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
+            let nx = x as isize + ddx;
+            let ny = y as isize + ddy;
+            if nx < 0 || ny < 0 || nx >= width as isize || ny >= height as isize {
+                continue;
+            }
+            let nidx = ny as usize * width + nx as usize;
+            let nd = flow_dist[nidx];
+            if nd != u32::MAX && nd > obj_fd {
+                downstream_dx += ddx as f32;
+                downstream_dy += ddy as f32;
+            }
+        }
+    }
+    let has_flow = downstream_dx != 0.0 || downstream_dy != 0.0;
+
+    let threshold = 0.1;
+    let (dx, dy) = if net_y >= net_x && net_y > threshold {
+        if has_flow {
+            if downstream_dx.abs() >= downstream_dy.abs() {
+                (downstream_dx.signum() as isize, 0isize)
+            } else {
+                (0isize, downstream_dy.signum() as isize)
+            }
+        } else {
+            (0isize, 1isize)
+        }
+    } else if net_x > threshold && !x_stable {
+        (x_force.signum() as isize, 0isize)
+    } else if has_flow && (net_y > threshold || net_x > threshold) {
+        if downstream_dx.abs() >= downstream_dy.abs() {
+            (downstream_dx.signum() as isize, 0isize)
+        } else {
+            (0isize, downstream_dy.signum() as isize)
+        }
+    } else {
+        (0isize, 0isize)
+    };
+
+    if dx == 0 && dy == 0 {
+        return None;
+    }
+
+    Some((dx, dy, net_x.max(net_y)))
+}
+
+fn draw_flow_arrows(
+    grid: Res<Grid>,
+    view_mode: Res<ViewMode>,
+    selected: Res<SelectedTool>,
+    mut gizmos: Gizmos,
+) {
+    if *view_mode != ViewMode::FlowArrows {
+        return;
+    }
+
+    let flow_dist = build_flow_distance(&grid);
+    let depth = build_depth_pressure(&grid);
+    let max_pressure = depth.iter().cloned().fold(1.0f32, f32::max).max(1.0);
+
+    let weight = match *selected {
+        SelectedTool::Block(w) => w,
+        _ => 200.0,
+    };
+
+    let arrow_y = CUBE_HEIGHT + 0.5;
+
+    for y in 0..grid.height {
+        for x in 0..grid.width {
+            let Some((dx, dy, net)) =
+                compute_arrow_info(&grid, &depth, &flow_dist, x, y, weight)
+            else {
+                continue;
+            };
+
+            // Brighter orange = stronger force relative to max pressure
+            let t = (net / max_pressure).clamp(0.0, 1.0);
+            let color = Color::srgba(1.0, 0.3 + t * 0.7, 0.0, 0.4 + t * 0.6);
+
+            let start = Vec3::new(x as f32, arrow_y, y as f32);
+            let end = Vec3::new(
+                x as f32 + dx as f32 * 0.45,
+                arrow_y,
+                y as f32 + dy as f32 * 0.45,
+            );
+            gizmos.arrow(start, end, color);
+        }
+    }
 }
 
 fn draw_hover_cursor(

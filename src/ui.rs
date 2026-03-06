@@ -1,7 +1,7 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
-use crate::grid::{GameState, SelectedTool, PANEL_WIDTH};
+use crate::grid::{GameState, PANEL_WIDTH, SelectedTool, ViewMode};
 use crate::simulation::{Cell, Grid};
 
 pub struct UiPlugin;
@@ -18,8 +18,8 @@ impl Plugin for UiPlugin {
                 update_tool_buttons,
                 handle_inlet_toggle,
                 update_inlet_button,
-                handle_heatmap_toggle,
-                update_heatmap_button,
+                handle_view_toggle,
+                update_view_buttons,
                 handle_reset,
                 handle_speed_buttons,
                 update_speed_label,
@@ -50,7 +50,7 @@ pub struct InletButton;
 struct ResetButton;
 
 #[derive(Component)]
-struct HeatmapButton;
+struct ViewButton(ViewMode);
 
 #[derive(Component)]
 struct StatusText;
@@ -425,30 +425,56 @@ fn setup_ui(mut commands: Commands) {
                     ));
                 });
 
-            // Heatmap toggle button
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(104.0),
-                        height: Val::Px(32.0),
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
-                    HeatmapButton,
-                ))
-                .with_children(|btn| {
-                    btn.spawn((
-                        Text::new("Pressure"),
-                        TextFont {
-                            font_size: 12.0,
+            // Divider
+            parent.spawn((
+                Node {
+                    width: Val::Percent(80.0),
+                    height: Val::Px(1.0),
+                    margin: UiRect::vertical(Val::Px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.35, 0.35, 0.40)),
+            ));
+
+            // VIEW section label
+            parent.spawn((
+                Text::new("VIEW"),
+                TextFont {
+                    font_size: 9.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.55, 0.55, 0.60)),
+            ));
+
+            for (label, mode) in [
+                ("Normal", ViewMode::Normal),
+                ("Pressure", ViewMode::Pressure),
+                ("Flow", ViewMode::FlowArrows),
+            ] {
+                parent
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Px(104.0),
+                            height: Val::Px(28.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
                             ..default()
                         },
-                        TextColor(Color::WHITE),
-                    ));
-                });
+                        BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
+                        ViewButton(mode),
+                    ))
+                    .with_children(|btn| {
+                        btn.spawn((
+                            Text::new(label),
+                            TextFont {
+                                font_size: 12.0,
+                                ..default()
+                            },
+                            TextColor(Color::WHITE),
+                        ));
+                    });
+            }
 
             // Divider
             parent.spawn((
@@ -633,16 +659,21 @@ fn handle_drain_button(
 fn update_tool_buttons(
     mut weight_query: Query<
         (&WeightButton, &mut BackgroundColor),
-        (Without<EraserButton>, Without<SpringButton>, Without<DrainButton>),
+        (
+            Without<EraserButton>,
+            Without<SpringButton>,
+            Without<DrainButton>,
+        ),
     >,
     mut eraser_query: Query<
         &mut BackgroundColor,
-        (With<EraserButton>, Without<SpringButton>, Without<DrainButton>),
+        (
+            With<EraserButton>,
+            Without<SpringButton>,
+            Without<DrainButton>,
+        ),
     >,
-    mut spring_query: Query<
-        &mut BackgroundColor,
-        (With<SpringButton>, Without<DrainButton>),
-    >,
+    mut spring_query: Query<&mut BackgroundColor, (With<SpringButton>, Without<DrainButton>)>,
     mut drain_query: Query<&mut BackgroundColor, With<DrainButton>>,
     selected: Res<SelectedTool>,
 ) {
@@ -709,29 +740,29 @@ fn update_inlet_button(
     }
 }
 
-fn handle_heatmap_toggle(
-    interaction_query: Query<&Interaction, (Changed<Interaction>, With<HeatmapButton>)>,
-    mut state: ResMut<GameState>,
+fn handle_view_toggle(
+    interaction_query: Query<(&Interaction, &ViewButton), Changed<Interaction>>,
+    mut view_mode: ResMut<ViewMode>,
 ) {
-    for interaction in &interaction_query {
+    for (interaction, btn) in &interaction_query {
         if *interaction == Interaction::Pressed {
-            state.show_pressure = !state.show_pressure;
+            *view_mode = btn.0.clone();
         }
     }
 }
 
-fn update_heatmap_button(
-    mut query: Query<&mut BackgroundColor, With<HeatmapButton>>,
-    state: Res<GameState>,
+fn update_view_buttons(
+    mut query: Query<(&ViewButton, &mut BackgroundColor)>,
+    view_mode: Res<ViewMode>,
 ) {
-    if !state.is_changed() {
+    if !view_mode.is_changed() {
         return;
     }
-    for mut color in &mut query {
-        *color = if state.show_pressure {
+    for (btn, mut color) in &mut query {
+        *color = if btn.0 == *view_mode {
             BackgroundColor(Color::srgb(0.2, 0.5, 0.8))
         } else {
-            BackgroundColor(Color::srgb(0.3, 0.3, 0.3))
+            BackgroundColor(Color::srgb(0.30, 0.30, 0.34))
         };
     }
 }
