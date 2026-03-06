@@ -1,7 +1,6 @@
 use bevy::prelude::*;
-use std::f32::consts::FRAC_PI_2;
 
-use crate::grid::{GameState, GridConfig};
+use crate::grid::{GameState, GridConfig, PANEL_WIDTH, SelectedTool};
 use crate::simulation::{Cell, Grid, MAX_WATER_KG, build_depth_pressure};
 
 pub struct RenderPlugin;
@@ -227,39 +226,123 @@ fn render_heat_grid_3d(
     }
 }
 
+/// Returns the world-space Y of the rendered top surface of a cell.
+fn cell_surface_y(cell: &Cell) -> f32 {
+    let h = match cell {
+        Cell::Air => 0.1,
+        Cell::Water(kg) => 0.1 + (kg / MAX_WATER_KG) * 0.9,
+        Cell::Wall => 1.0,
+        Cell::Spring => 1.0,
+        Cell::Drain => 0.3,
+        Cell::Object(_) => 0.8,
+    };
+    h * CUBE_HEIGHT
+}
+
+/// Casts a ray from the cursor and returns the grid cell of the first solid
+/// surface hit, scanning from the top of the scene downward (camera-near first).
+/// Falls back to the Y=0 ground plane if no solid surface is found.
+pub fn find_cursor_cell(
+    cursor_pos: Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    grid: &Grid,
+) -> Option<(usize, usize)> {
+    if cursor_pos.x < PANEL_WIDTH {
+        return None;
+    }
+    let ray = camera.viewport_to_world(camera_transform, cursor_pos).ok()?;
+    let denom = ray.direction.y;
+    if denom.abs() < 1e-6 {
+        return None;
+    }
+
+    // Scan from max height (5.0) down to 0 in small steps.
+    // Each step moves ~0.1 world units in Y, ~0.05 world units in XZ.
+    // Scanning top-down ensures the frontmost (camera-nearest) surface is found first.
+    let steps = 50u32;
+    for step in 0..=steps {
+        let h = CUBE_HEIGHT * (1.0 - step as f32 / steps as f32);
+        let t = (h - ray.origin.y) / denom;
+        if t < 0.0 {
+            continue;
+        }
+        let hit = ray.origin + t * *ray.direction;
+        let gx_f = (hit.x + 0.5).floor();
+        let gz_f = (hit.z + 0.5).floor();
+        if gx_f < 0.0 || gz_f < 0.0 {
+            continue;
+        }
+        let gx = gx_f as usize;
+        let gz = gz_f as usize;
+        if gx >= grid.width || gz >= grid.height {
+            continue;
+        }
+        let cell = grid.get_cell(gx, gz);
+        if matches!(cell, Cell::Air) {
+            continue;
+        }
+        // Hit if the ray is at or just below this cell's top surface
+        if cell_surface_y(cell) >= h - (CUBE_HEIGHT / steps as f32) {
+            return Some((gx, gz));
+        }
+    }
+
+    // No solid surface — fall back to the Y=0 ground plane
+    let t = -ray.origin.y / denom;
+    if t < 0.0 {
+        return None;
+    }
+    let hit = ray.origin + t * *ray.direction;
+    let gx = (hit.x + 0.5).floor();
+    let gz = (hit.z + 0.5).floor();
+    if gx < 0.0 || gz < 0.0 {
+        return None;
+    }
+    Some((gx as usize, gz as usize))
+}
+
 fn draw_hover_cursor(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
     grid: Res<Grid>,
     state: Res<GameState>,
+    tool: Res<SelectedTool>,
     mut gizmos: Gizmos,
 ) {
     let Ok(window) = windows.single() else { return };
     let Ok((camera, camera_transform)) = camera_q.single() else {
         return;
     };
+    // Height fraction matches what render_grid uses for each cell type
+    let h = match *tool {
+        SelectedTool::Block(_) => 0.8,
+        SelectedTool::Spring => 1.0,
+        SelectedTool::Drain => 0.3,
+        SelectedTool::Eraser => 0.15,
+    };
+    let scaled = h * CUBE_HEIGHT;
+
     let Some(cursor_pos) = window.cursor_position() else {
         return;
     };
-    let Some((cx, cy)) =
-        crate::camera::cursor_to_grid(cursor_pos, camera, camera_transform)
-    else {
+    let Some((cx, cy)) = find_cursor_cell(cursor_pos, camera, camera_transform, &grid) else {
         return;
     };
 
     let r = state.brush_radius as usize;
-    let rotation = Quat::from_rotation_x(-FRAC_PI_2);
-    let color = Color::srgba(1.0, 1.0, 0.0, 0.9);
+    // White outline stands out against blue water and orange/brown blocks
+    let color = Color::WHITE;
 
     for dy in 0..=(r * 2) {
         for dx in 0..=(r * 2) {
             let bx = (cx + dx).saturating_sub(r);
             let by = (cy + dy).saturating_sub(r);
             if bx < grid.width && by < grid.height {
-                let center = Vec3::new(bx as f32, 0.3, by as f32);
-                gizmos.rect(
-                    Isometry3d::new(center, rotation),
-                    Vec2::splat(1.0),
+                let center = Vec3::new(bx as f32, scaled / 2.0, by as f32);
+                gizmos.cube(
+                    Transform::from_translation(center)
+                        .with_scale(Vec3::new(1.0, scaled, 1.0)),
                     color,
                 );
             }

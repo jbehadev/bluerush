@@ -8,6 +8,7 @@ pub struct AppConfig {
     pub grid_cols: usize,
     pub grid_rows: usize,
     pub tile_size: f32,
+    pub collision_destruction: bool,
 }
 
 impl Default for AppConfig {
@@ -18,6 +19,7 @@ impl Default for AppConfig {
             grid_cols: 42,
             grid_rows: 37,
             tile_size: 16.0,
+            collision_destruction: false,
         }
     }
 }

@@ -1,8 +1,9 @@
-use crate::camera::cursor_to_grid;
+use crate::render::find_cursor_cell;
 use crate::persistence;
 use crate::simulation::{
     Cell, Grid, MAX_WATER_KG, build_depth_pressure, step_objects, step_simulation,
 };
+use rand::thread_rng;
 use crate::undo::UndoStack;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::prelude::*;
@@ -54,6 +55,7 @@ pub struct GridConfig {
     pub cols: usize,
     pub rows: usize,
     pub tile_size: f32,
+    pub collision_destruction: bool,
 }
 
 #[derive(Resource)]
@@ -117,7 +119,7 @@ fn handle_input(
 
     if mouse.pressed(MouseButton::Left) {
         if let Some(cursor_pos) = window.cursor_position() {
-            if let Some((cx, cy)) = cursor_to_grid(cursor_pos, camera, camera_transform) {
+            if let Some((cx, cy)) = find_cursor_cell(cursor_pos, camera, camera_transform, &grid) {
                 let r = state.brush_radius as usize;
                 for dy in 0..=(r * 2) {
                     for dx in 0..=(r * 2) {
@@ -173,7 +175,7 @@ fn handle_input(
     }
     if mouse.just_pressed(MouseButton::Right) && shift {
         if let Some(cursor_pos) = window.cursor_position() {
-            if let Some((grid_x, grid_y)) = cursor_to_grid(cursor_pos, camera, camera_transform) {
+            if let Some((grid_x, grid_y)) = find_cursor_cell(cursor_pos, camera, camera_transform, &grid) {
                 if grid_x < grid.width && grid_y < grid.height {
                     println!(
                         "{grid_x}, {grid_y}: {:?} pressure: {}",
@@ -227,6 +229,7 @@ fn handle_input(
     }
 }
 
+
 /// Opens the gate at y=1 one cell per side per frame when the inlet is ON,
 /// closes it one cell per side per frame when OFF (overwrites any water).
 fn animate_gate(mut grid: ResMut<Grid>, mut state: ResMut<GameState>) {
@@ -275,12 +278,13 @@ fn flow_water(mut grid: ResMut<Grid>, state: Res<GameState>) {
     }
 }
 
-fn simulate_objects(mut grid: ResMut<Grid>, state: Res<GameState>) {
+fn simulate_objects(mut grid: ResMut<Grid>, state: Res<GameState>, config: Res<GridConfig>) {
     if !state.water_flow {
         return;
     }
+    let mut rng = thread_rng();
     for _ in 0..state.sim_speed {
-        grid.cells = step_objects(&grid);
+        step_objects(&mut grid, &mut rng, config.collision_destruction);
     }
 }
 

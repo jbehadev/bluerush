@@ -251,7 +251,7 @@ pub fn build_flow_distance(grid: &Grid) -> Vec<u32> {
     dist
 }
 
-pub fn step_objects(grid: &Grid) -> Vec<Cell> {
+pub fn step_objects(grid: &mut Grid, rng: &mut impl Rng, collision_destruction: bool) {
     let width = grid.width;
     let height = grid.height;
 
@@ -421,7 +421,6 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
     }
 
     // Build a set of winning intent indices — one per destination, chosen randomly.
-    let mut rng = rand::thread_rng();
     let mut winners: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for candidates in by_dst.values() {
         let winner = candidates[rng.r#gen::<usize>() % candidates.len()];
@@ -439,19 +438,27 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
     for &i in &sorted_winners {
         let intent = &intents[i];
 
-        // Helper: returns true if the cell at `idx` blocks entry.
-        let is_blocked = |idx: usize| -> bool {
-            matches!(new_cells[idx], Cell::Wall | Cell::Spring | Cell::Drain)
-                || (matches!(new_cells[idx], Cell::Object(_)) && !moved_srcs.contains(&idx))
-        };
-
-        // Try primary direction first; fall back to secondary if blocked.
-        let effective_dst = if !is_blocked(intent.dst) {
-            Some(intent.dst)
-        } else if let Some(fb) = intent.fallback_dst {
-            if !is_blocked(fb) { Some(fb) } else { None }
-        } else {
-            None
+        // Scope the closure so its borrows of new_cells/moved_srcs end before
+        // we may mutate new_cells below for collision destruction.
+        let effective_dst = {
+            let is_blocked = |idx: usize| -> bool {
+                matches!(new_cells[idx], Cell::Wall | Cell::Spring | Cell::Drain)
+                    || (matches!(new_cells[idx], Cell::Object(_)) && !moved_srcs.contains(&idx))
+            };
+            let primary_hits_object = matches!(new_cells[intent.dst], Cell::Object(_))
+                && !moved_srcs.contains(&intent.dst);
+            // Try primary direction first.
+            if !is_blocked(intent.dst) {
+                Some(intent.dst)
+            } else if collision_destruction && primary_hits_object {
+                // Skip fallback — commit to the collision immediately so the mover
+                // doesn't oscillate by escaping sideways and looping back.
+                None
+            } else if let Some(fb) = intent.fallback_dst {
+                if !is_blocked(fb) { Some(fb) } else { None }
+            } else {
+                None
+            }
         };
 
         if let Some(dst) = effective_dst {
@@ -459,10 +466,26 @@ pub fn step_objects(grid: &Grid) -> Vec<Cell> {
             new_cells[dst] = Cell::Object(intent.weight);
             new_cells[intent.src] = vacated;
             moved_srcs.insert(intent.src);
+        } else if collision_destruction
+            && matches!(new_cells[intent.dst], Cell::Object(_))
+            && !moved_srcs.contains(&intent.dst)
+        {
+            // Mover slammed into a stationary Object — destroy mover and dent victim.
+            let mover_weight = intent.weight;
+            let victim_destroyed = if let Cell::Object(ref mut victim_w) = new_cells[intent.dst] {
+                *victim_w -= mover_weight;
+                *victim_w <= 0.0
+            } else {
+                false
+            };
+            if victim_destroyed {
+                new_cells[intent.dst] = Cell::Air;
+            }
+            new_cells[intent.src] = Cell::Air;
         }
     }
 
-    new_cells
+    grid.cells = new_cells;
 }
 
 #[cfg(test)]
@@ -490,18 +513,19 @@ mod tests {
         let mut cells = vec![Cell::Air; 9];
         cells[0 * 3 + 1] = Cell::Water(MAX_WATER_KG); // (1,0)
         cells[1 * 3 + 1] = Cell::Object(10.0); // (1,1)
-        let grid = make_grid(3, 3, cells);
+        let mut grid = make_grid(3, 3, cells);
+        let mut rng = rand::thread_rng();
 
-        let result = step_objects(&grid);
+        step_objects(&mut grid, &mut rng, false);
 
         // Object should have moved to (1,2)
         assert!(
-            matches!(result[2 * 3 + 1], Cell::Object(_)),
+            matches!(grid.cells[2 * 3 + 1], Cell::Object(_)),
             "Object should have moved to (1,2)"
         );
         // Source (1,1) should now be water
         assert!(
-            matches!(result[1 * 3 + 1], Cell::Air),
+            matches!(grid.cells[1 * 3 + 1], Cell::Air),
             "Vacated cell (1,1) should be air"
         );
     }
@@ -513,18 +537,19 @@ mod tests {
         cells[0 * 3 + 1] = Cell::Water(MAX_WATER_KG);
         cells[1 * 3 + 1] = Cell::Water(MAX_WATER_KG);
         cells[2 * 3 + 1] = Cell::Object(4000.0);
-        let grid = make_grid(3, 5, cells);
+        let mut grid = make_grid(3, 5, cells);
+        let mut rng = rand::thread_rng();
 
-        let result = step_objects(&grid);
+        step_objects(&mut grid, &mut rng, false);
 
         // Object should NOT have moved
         assert!(
-            matches!(result[2 * 3 + 1], Cell::Object(_)),
+            matches!(grid.cells[2 * 3 + 1], Cell::Object(_)),
             "Heavy object should stay at (2,1)"
         );
         // Cell above should still be air
         assert!(
-            matches!(result[3 * 3 + 1], Cell::Air),
+            matches!(grid.cells[3 * 3 + 1], Cell::Air),
             "Cell above should remain air"
         );
     }
@@ -610,11 +635,12 @@ mod tests {
         cells[1 * 3 + 1] = Cell::Object(200.0); // y=1
         cells[2 * 3 + 1] = Cell::Object(200.0); // y=2
         cells[3 * 3 + 1] = Cell::Object(200.0); // y=3
-        let grid = make_grid(3, 5, cells);
+        let mut grid = make_grid(3, 5, cells);
+        let mut rng = rand::thread_rng();
 
-        let result = step_objects(&grid);
+        step_objects(&mut grid, &mut rng, false);
 
-        let object_count = result
+        let object_count = grid.cells
             .iter()
             .filter(|c| matches!(c, Cell::Object(_)))
             .count();
@@ -636,7 +662,8 @@ mod tests {
         cells[1 * 3 + 1] = Cell::Object(200.0);        // y=1 bottom object
         cells[2 * 3 + 1] = Cell::Object(200.0);        // y=2 top object
         cells[3 * 3 + 1] = Cell::Water(MAX_WATER_KG); // y=3 water above
-        let grid = make_grid(3, 5, cells);
+        let mut grid = make_grid(3, 5, cells);
+        let mut rng = rand::thread_rng();
 
         let depth = super::build_depth_pressure(&grid);
         println!("depth y=0 (water): {:.2}", depth[0 * 3 + 1]);
@@ -644,24 +671,24 @@ mod tests {
         println!("depth y=2 (object): {:.2}", depth[2 * 3 + 1]);
         println!("depth y=3 (water): {:.2}", depth[3 * 3 + 1]);
 
-        let result = step_objects(&grid);
-        println!("result y=0: {:?}", result[0 * 3 + 1]);
-        println!("result y=1: {:?}", result[1 * 3 + 1]);
-        println!("result y=2: {:?}", result[2 * 3 + 1]);
-        println!("result y=3: {:?}", result[3 * 3 + 1]);
-        println!("result y=4: {:?}", result[4 * 3 + 1]);
+        step_objects(&mut grid, &mut rng, false);
+        println!("result y=0: {:?}", grid.cells[0 * 3 + 1]);
+        println!("result y=1: {:?}", grid.cells[1 * 3 + 1]);
+        println!("result y=2: {:?}", grid.cells[2 * 3 + 1]);
+        println!("result y=3: {:?}", grid.cells[3 * 3 + 1]);
+        println!("result y=4: {:?}", grid.cells[4 * 3 + 1]);
 
         // Both objects should have moved up by 1
         assert!(
-            matches!(result[2 * 3 + 1], Cell::Object(_)),
+            matches!(grid.cells[2 * 3 + 1], Cell::Object(_)),
             "Bottom object should be at y=2"
         );
         assert!(
-            matches!(result[3 * 3 + 1], Cell::Object(_)),
+            matches!(grid.cells[3 * 3 + 1], Cell::Object(_)),
             "Top object should be at y=3"
         );
         assert!(
-            !matches!(result[1 * 3 + 1], Cell::Object(_)),
+            !matches!(grid.cells[1 * 3 + 1], Cell::Object(_)),
             "y=1 should no longer have an object"
         );
     }
@@ -693,32 +720,33 @@ mod tests {
         cells[1 * 3 + 1] = Cell::Object(200.0); // (1,1)
         // Water below
         cells[0 * 3 + 1] = Cell::Water(MAX_WATER_KG); // (1,0)
-        let grid = make_grid(3, 5, cells);
+        let mut grid = make_grid(3, 5, cells);
+        let mut rng = rand::thread_rng();
 
-        let result = step_objects(&grid);
+        step_objects(&mut grid, &mut rng, false);
 
         assert_eq!(
-            result.iter().filter(|c| matches!(c, Cell::Object(_))).count(),
+            grid.cells.iter().filter(|c| matches!(c, Cell::Object(_))).count(),
             3,
             "Object count must be preserved"
         );
         // Top object must have slipped right to (2,3)
         assert!(
-            matches!(result[3 * 3 + 2], Cell::Object(_)),
+            matches!(grid.cells[3 * 3 + 2], Cell::Object(_)),
             "Top object should have slipped sideways to (2,3)"
         );
         // Chain below should have shifted up: (1,2) and (1,3) now hold the lower two objects
         assert!(
-            matches!(result[3 * 3 + 1], Cell::Object(_)),
+            matches!(grid.cells[3 * 3 + 1], Cell::Object(_)),
             "Object from y=2 should now be at (1,3)"
         );
         assert!(
-            matches!(result[2 * 3 + 1], Cell::Object(_)),
+            matches!(grid.cells[2 * 3 + 1], Cell::Object(_)),
             "Object from y=1 should now be at (1,2)"
         );
         // Bottom slot should be vacated
         assert!(
-            !matches!(result[1 * 3 + 1], Cell::Object(_)),
+            !matches!(grid.cells[1 * 3 + 1], Cell::Object(_)),
             "(1,1) should be vacated after chain shifts up"
         );
     }
@@ -735,38 +763,115 @@ mod tests {
         cells[2 * 3 + 0] = Cell::Object(200.0); // y=2
         cells[2 * 3 + 1] = Cell::Object(200.0); // y=2
         cells[2 * 3 + 2] = Cell::Object(200.0); // y=2
-        let grid = make_grid(3, 5, cells);
+        let mut grid = make_grid(3, 5, cells);
+        let mut rng = rand::thread_rng();
 
-        let result = step_objects(&grid);
+        step_objects(&mut grid, &mut rng, false);
 
-        let object_count = result
+        let object_count = grid.cells
             .iter()
             .filter(|c| matches!(c, Cell::Object(_)))
             .count();
         assert_eq!(object_count, 3, "Should still have exactly 3 objects");
         assert!(
-            !matches!(result[2 * 3 + 0], Cell::Object(_)),
+            !matches!(grid.cells[2 * 3 + 0], Cell::Object(_)),
             "not object at (0,2)"
         );
         assert!(
-            !matches!(result[2 * 3 + 1], Cell::Object(_)),
+            !matches!(grid.cells[2 * 3 + 1], Cell::Object(_)),
             "not object at (1,2)"
         );
         assert!(
-            !matches!(result[2 * 3 + 2], Cell::Object(_)),
+            !matches!(grid.cells[2 * 3 + 2], Cell::Object(_)),
             "not object at (2,2)"
         );
         assert!(
-            matches!(result[3 * 3 + 0], Cell::Object(_)),
+            matches!(grid.cells[3 * 3 + 0], Cell::Object(_)),
             "object at (0,3)"
         );
         assert!(
-            matches!(result[3 * 3 + 1], Cell::Object(_)),
+            matches!(grid.cells[3 * 3 + 1], Cell::Object(_)),
             "object at (1,3)"
         );
         assert!(
-            matches!(result[3 * 3 + 2], Cell::Object(_)),
+            matches!(grid.cells[3 * 3 + 2], Cell::Object(_)),
             "object at (2,3)"
+        );
+    }
+
+    // Grid layout for collision tests:
+    //   width=4, height=3
+    //   y=2: Air   Air    Air    Air
+    //   y=1: Water Mover  Victim Wall
+    //   y=0: Water Air    Air    Air
+    //
+    // Water at (0,0) gives depth pressure to water at (0,1), which pushes
+    // the mover rightward into the victim. The Wall at (3,1) ensures no
+    // fallback escape route for the mover.
+    fn make_collision_grid(mover_w: f32, victim_w: f32) -> Grid {
+        let width = 4;
+        let height = 3;
+        let mut cells = vec![Cell::Air; width * height];
+        cells[0 * width + 0] = Cell::Water(MAX_WATER_KG); // (0,0) depth source
+        cells[1 * width + 0] = Cell::Water(MAX_WATER_KG); // (0,1) pushes right
+        cells[1 * width + 1] = Cell::Object(mover_w);     // (1,1) mover
+        cells[1 * width + 2] = Cell::Object(victim_w);    // (2,1) victim
+        cells[1 * width + 3] = Cell::Wall;                // (3,1) right boundary
+        make_grid(width, height, cells)
+    }
+
+    #[test]
+    fn collision_destroys_mover_and_dents_victim() {
+        let mut grid = make_collision_grid(200.0, 500.0);
+        let mut rng = rand::thread_rng();
+
+        step_objects(&mut grid, &mut rng, true);
+
+        assert!(
+            matches!(grid.cells[1 * 4 + 1], Cell::Air),
+            "mover should be destroyed on collision"
+        );
+        if let Cell::Object(w) = grid.cells[1 * 4 + 2] {
+            assert!(
+                (w - 300.0).abs() < 1.0,
+                "victim weight should be reduced to 300 kg, got {w}"
+            );
+        } else {
+            panic!("victim should still be an Object with reduced weight");
+        }
+    }
+
+    #[test]
+    fn collision_off_leaves_both_intact() {
+        let mut grid = make_collision_grid(200.0, 500.0);
+        let mut rng = rand::thread_rng();
+
+        step_objects(&mut grid, &mut rng, false);
+
+        assert!(
+            matches!(grid.cells[1 * 4 + 1], Cell::Object(_)),
+            "mover should stay with collision_destruction off"
+        );
+        assert!(
+            matches!(grid.cells[1 * 4 + 2], Cell::Object(_)),
+            "victim should be untouched with collision_destruction off"
+        );
+    }
+
+    #[test]
+    fn collision_destroys_victim_when_mover_outweighs_it() {
+        let mut grid = make_collision_grid(600.0, 200.0);
+        let mut rng = rand::thread_rng();
+
+        step_objects(&mut grid, &mut rng, true);
+
+        assert!(
+            matches!(grid.cells[1 * 4 + 1], Cell::Air),
+            "mover (600 kg) should be destroyed"
+        );
+        assert!(
+            matches!(grid.cells[1 * 4 + 2], Cell::Air),
+            "victim (200 kg) should also be destroyed when mover outweighs it"
         );
     }
 }

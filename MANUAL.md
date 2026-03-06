@@ -21,11 +21,13 @@ BlueRush is a flood simulation game where water rushes in and carries objects in
 | 1 | Select 200 kg block |
 | 2 | Select 500 kg block |
 | 3 | Select 1000 kg block |
+| 4 | Select 2000 kg block |
+| 5 | Select 5000 kg block |
 | Cmd+S | Save grid to file |
 | Cmd+O | Load grid from file |
 
 ### Toolbar (Left Panel)
-- **Weight buttons** — select block weight (200 / 500 / 1000 kg)
+- **Weight buttons** — select block weight (200 / 500 / 1000 / 2000 / 5000 kg)
 - **Eraser** — switch to eraser tool to remove placed cells
 - **Spring** — place a water spring source
 - **Inlet toggle** — open/close the water inlet gate
@@ -42,7 +44,7 @@ BlueRush is a flood simulation game where water rushes in and carries objects in
 ## Game Mechanics
 - **Water** flows in from the bottom row when activated and spreads via pressure diffusion
 - **Light objects** (200 kg) get pushed around easily by water pressure
-- **Heavy objects** (1000 kg) resist water flow and can act as barriers
+- **Heavy objects** (5000 kg) resist water flow and can act as barriers
 - **Springs** continuously generate water at their location
 - **Walls** are immovable border tiles that cannot be overwritten
 - **Objects float** — buoyancy pushes objects upward based on depth pressure
