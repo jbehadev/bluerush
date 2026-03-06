@@ -1,0 +1,58 @@
+name: Build
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macOS (Apple Silicon)
+            runner: macos-latest
+            binary: BlueRush
+            artifact: BlueRush-macos-arm
+          - os: macOS (Intel)
+            runner: macos-13
+            binary: BlueRush
+            artifact: BlueRush-macos-intel
+          - os: Windows
+            runner: windows-latest
+            binary: BlueRush.exe
+            artifact: BlueRush-windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: sha
+        shell: bash
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-pr${{ github.event.pull_request.number }}-${{ steps.sha.outputs.short }}
+          path: target/release/${{ matrix.binary }}
+          if-no-files-found: error
