@@ -14,6 +14,7 @@ impl Plugin for RenderPlugin {
 
 pub const WATER_PALETTE_SIZE: usize = 32;
 pub const HEATMAP_PALETTE_SIZE: usize = 64;
+pub const OBJECT_PALETTE_SIZE: usize = 64;
 /// Height multiplier so cubes are visible relative to grid width
 pub const CUBE_HEIGHT: f32 = 5.0;
 
@@ -48,10 +49,12 @@ fn build_palette(materials: &mut Assets<StandardMaterial>) -> MaterialPalette {
         })
         .collect();
 
-    let object_grays: &[f32] = &[0.80, 0.65, 0.42, 0.30, 0.10];
-    let objects: Vec<_> = object_grays
-        .iter()
-        .map(|&g| materials.add(Color::srgb(g, g, g)))
+    let objects: Vec<_> = (0..OBJECT_PALETTE_SIZE)
+        .map(|i| {
+            let t = i as f32 / (OBJECT_PALETTE_SIZE - 1) as f32;
+            let g = 0.80 - t * 0.70; // lerp: 0.80 (lightest, ~0 kg) → 0.10 (darkest, 5000 kg)
+            materials.add(Color::srgb(g, g, g))
+        })
         .collect();
 
     let heatmap: Vec<_> = (0..HEATMAP_PALETTE_SIZE)
@@ -171,17 +174,8 @@ fn render_grid(
             Cell::Spring => (1.0, &palette.spring),
             Cell::Drain => (0.3, &palette.drain),
             Cell::Object(w) => {
-                let idx = if *w <= 200.0 {
-                    0
-                } else if *w <= 500.0 {
-                    1
-                } else if *w <= 1000.0 {
-                    2
-                } else if *w <= 2000.0 {
-                    3
-                } else {
-                    4
-                };
+                let t = (w / 5000.0).clamp(0.0, 1.0);
+                let idx = (t * (OBJECT_PALETTE_SIZE - 1) as f32).round() as usize;
                 (0.8, &palette.objects[idx])
             }
         };
