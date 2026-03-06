@@ -14,3 +14,9 @@ At the start of each session, read `PROGRESS.md` to restore context. At the end 
 - What was built
 - Where we left off
 - What comes next
+
+Never work on the main branch, always create a new branch and when ready follow the steps:
+1. cargo build
+2. cargo test
+3. cargo run and let user test
+4. If satisfactory, commit to new branch and create a PR to the main branch.
