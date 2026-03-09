@@ -58,10 +58,17 @@ pub struct GridConfig {
     pub collision_destruction: bool,
 }
 
+#[derive(Resource, PartialEq, Clone, Default)]
+pub enum ViewMode {
+    #[default]
+    Normal,
+    Pressure,
+    FlowArrows,
+}
+
 #[derive(Resource)]
 pub struct GameState {
     pub water_flow: bool,
-    pub show_pressure: bool,
     pub gate_progress: usize,
     pub sim_speed: u32,
     pub brush_radius: u32,
@@ -86,11 +93,11 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
 
     commands.insert_resource(GameState {
         water_flow: false,
-        show_pressure: false,
         gate_progress: 0,
         sim_speed: 1,
         brush_radius: 0,
     });
+    commands.init_resource::<ViewMode>();
     commands.insert_resource(SelectedTool::Block(200.0));
     commands.insert_resource(Grid::init(width, height));
 }
@@ -103,6 +110,7 @@ fn handle_input(
     mut grid: ResMut<Grid>,
     mut state: ResMut<GameState>,
     mut selected: ResMut<SelectedTool>,
+    mut view_mode: ResMut<ViewMode>,
     mut save_events: MessageWriter<SaveRequested>,
     mut load_events: MessageWriter<LoadRequested>,
     mut undo_stack: ResMut<UndoStack>,
@@ -225,7 +233,18 @@ fn handle_input(
         undo_stack.clear();
     }
     if keyboard.just_pressed(KeyCode::KeyM) {
-        state.show_pressure = !state.show_pressure;
+        *view_mode = if *view_mode == ViewMode::Pressure {
+            ViewMode::Normal
+        } else {
+            ViewMode::Pressure
+        };
+    }
+    if keyboard.just_pressed(KeyCode::KeyF) {
+        *view_mode = if *view_mode == ViewMode::FlowArrows {
+            ViewMode::Normal
+        } else {
+            ViewMode::FlowArrows
+        };
     }
 }
 
