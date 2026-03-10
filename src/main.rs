@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use bevy::prelude::*;
+use bevy::winit::{UpdateMode, WinitSettings};
 
 use crate::config::AppConfig;
 use crate::grid::{GridConfig, GridPlugin};
@@ -17,6 +20,10 @@ fn main() {
     let config = AppConfig::load();
 
     App::new()
+        .insert_resource(WinitSettings {
+            focused_mode: UpdateMode::reactive(Duration::from_secs_f64(1.0 / 60.0)),
+            unfocused_mode: UpdateMode::reactive(Duration::from_secs(1)),
+        })
         .insert_resource(GridConfig {
             cols: config.grid_cols,
             rows: config.grid_rows,

@@ -153,7 +153,13 @@ fn render_grid(
     mut tile_query: Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
     palette: Res<MaterialPalette>,
     view_mode: Res<ViewMode>,
+    state: Res<GameState>,
 ) {
+    // Skip rendering when neither the grid nor display mode has changed
+    if !grid.is_changed() && !state.is_changed() && !view_mode.is_changed() {
+        return;
+    }
+
     if *view_mode == ViewMode::Pressure {
         render_heat_grid_3d(&grid, &mut tile_query, &palette);
         return;
@@ -245,7 +251,9 @@ pub fn find_cursor_cell(
     if cursor_pos.x < PANEL_WIDTH {
         return None;
     }
-    let ray = camera.viewport_to_world(camera_transform, cursor_pos).ok()?;
+    let ray = camera
+        .viewport_to_world(camera_transform, cursor_pos)
+        .ok()?;
     let denom = ray.direction.y;
     if denom.abs() < 1e-6 {
         return None;
@@ -429,8 +437,7 @@ fn draw_flow_arrows(
 
     for y in 0..grid.height {
         for x in 0..grid.width {
-            let Some((dx, dy, net)) =
-                compute_arrow_info(&grid, &depth, &flow_dist, x, y, weight)
+            let Some((dx, dy, net)) = compute_arrow_info(&grid, &depth, &flow_dist, x, y, weight)
             else {
                 continue;
             };
@@ -489,8 +496,7 @@ fn draw_hover_cursor(
             if bx < grid.width && by < grid.height {
                 let center = Vec3::new(bx as f32, scaled / 2.0, by as f32);
                 gizmos.cube(
-                    Transform::from_translation(center)
-                        .with_scale(Vec3::new(1.0, scaled, 1.0)),
+                    Transform::from_translation(center).with_scale(Vec3::new(1.0, scaled, 1.0)),
                     color,
                 );
             }
