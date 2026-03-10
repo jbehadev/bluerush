@@ -14,14 +14,17 @@ jobs:
         include:
           - os: macOS (Apple Silicon)
             runner: macos-latest
+            target: aarch64-apple-darwin
             binary: BlueRush
             artifact: BlueRush-macos-arm
           - os: macOS (Intel)
-            runner: macos-13
+            runner: macos-latest
+            target: x86_64-apple-darwin
             binary: BlueRush
             artifact: BlueRush-macos-intel
           - os: Windows
             runner: windows-latest
+            target: x86_64-pc-windows-msvc
             binary: BlueRush.exe
             artifact: BlueRush-windows
 
@@ -35,6 +38,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
@@ -43,16 +48,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Build (release)
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}-pr${{ github.event.pull_request.number }}-${{ steps.sha.outputs.short }}
-          path: target/release/${{ matrix.binary }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
