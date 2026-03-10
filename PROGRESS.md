@@ -143,12 +143,36 @@ src/
   persistence.rs — save/load grid to JSON files
 ```
 
+### Session 11 (Performance & Flow Visualization)
+- **`WinitSettings` + `UpdateMode`** — Bevy runs at unlimited FPS by default (`Continuous` mode), burning 100% CPU even when idle; `WinitSettings` resource controls update frequency
+- **`UpdateMode::reactive(Duration)`** — caps frame rate by setting a minimum wait between frames; the app still wakes immediately on input/window events, so it feels responsive
+- **Focused vs unfocused modes** — `WinitSettings { focused_mode, unfocused_mode }` allows different update rates; we use 60 FPS when focused, 1 FPS when backgrounded
+- **`Res::is_changed()` for change detection** — Bevy tracks whether a resource was mutated since last frame; `render_grid` now skips all tile iteration when grid/state/view_mode are unchanged
+- **`ViewMode` enum** — extracted from `GameState.show_pressure` bool into its own resource (`ViewMode::Normal`, `ViewMode::Pressure`, `ViewMode::FlowArrows`)
+- **Flow arrow visualization** — `draw_flow_arrows` system uses `Gizmos::arrow` to show predicted movement direction for the selected block weight; reuses `build_depth_pressure` and `build_flow_distance` logic from `step_objects`
+- **`compute_arrow_info` helper** — duplicates the force/direction logic from `step_objects` for a hypothetical block at any cell; returns `(dx, dy, net_pressure)` or `None`
+
+## Current File Structure
+```
+src/
+  main.rs        — app setup, WinitSettings, registers TexturesPlugin + GridPlugin
+  grid.rs        — GridPlugin, GameState, SelectedTool, ViewMode, input/gate/flow/simulation systems
+  simulation.rs  — Cell/Grid types, step_simulation, step_objects, build_depth_pressure, build_flow_distance
+  render.rs      — RenderPlugin, MaterialPalette, render_grid (with change detection skip), draw_hover_cursor, draw_flow_arrows
+  camera.rs      — CameraPlugin, orbit camera, zoom, pan
+  ui.rs          — UiPlugin, tool/speed/brush buttons, labels
+  textures.rs    — TexturesPlugin, TextureAssets resource, programmatic froth textures
+  persistence.rs — save/load grid to JSON files
+  config.rs      — AppConfig, loads settings from config file
+  undo.rs        — UndoStack, cell-level undo/redo
+```
+
 ## Where We Left Off
-3D isometric rendering is fully working with material palette, camera controls, hover cursor gizmo, and save/load. Anti-oscillation fix applied to object physics.
+Performance optimized: 60 FPS cap via `WinitSettings` + `UpdateMode::reactive`, render skip via `Res::is_changed()`. Flow arrow visualization added as a new `ViewMode`. All compiles and runs.
 
 ## What Comes Next
 - **Water rendering polish** — animated water surface, transparency, or wave effects
 - **Object interaction** — dragging placed objects, object-to-object collision
 - **Sound effects** — water flow, object placement, splash sounds
 - **Level system** — predefined challenges with win conditions
-- **Performance** — profile with large grids, consider chunk-based updates
+- **Further performance** — profile with large grids, consider chunk-based simulation updates

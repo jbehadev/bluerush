@@ -45,7 +45,11 @@ fn build_palette(materials: &mut Assets<StandardMaterial>) -> MaterialPalette {
     let water: Vec<_> = (0..WATER_PALETTE_SIZE)
         .map(|i| {
             let fill = i as f32 / (WATER_PALETTE_SIZE - 1) as f32;
-            materials.add(Color::srgb(1.0 - fill, 1.0 - fill, 1.0))
+            materials.add(StandardMaterial {
+                base_color: Color::srgba(0.2, 0.5, 1.0, 0.3 + fill * 0.5),
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            })
         })
         .collect();
 
