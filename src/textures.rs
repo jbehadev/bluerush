@@ -13,10 +13,12 @@ impl Plugin for TexturesPlugin {
 #[derive(Resource)]
 pub struct TextureAssets {
     pub froth_frame1: Handle<Image>,
+    /// Reserved for future froth animation (alternates with frame1).
+    #[allow(dead_code)]
     pub froth_frame2: Handle<Image>,
 }
 
-fn load_textures(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+pub fn load_textures(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     // Frame 1: sin(x)*sin(y) interference pattern
     // Frame 2: cos(x)*cos(y) — phase-shifted 90° so bubble positions are complementary.
     // Alternating between them creates the illusion of churning foam.
