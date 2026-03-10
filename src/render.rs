@@ -2,13 +2,17 @@ use bevy::prelude::*;
 
 use crate::grid::{GameState, GridConfig, PANEL_WIDTH, SelectedTool, ViewMode};
 use crate::simulation::{Cell, Grid, MAX_WATER_KG, build_depth_pressure, build_flow_distance};
+use crate::textures::TextureAssets;
 
 pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_render)
-            .add_systems(Update, (render_grid, draw_hover_cursor, draw_flow_arrows));
+        app.add_systems(
+            Startup,
+            setup_render.after(crate::textures::load_textures),
+        )
+        .add_systems(Update, (render_grid, draw_hover_cursor, draw_flow_arrows));
     }
 }
 
@@ -36,7 +40,10 @@ pub struct MaterialPalette {
     pub heatmap_zero: Handle<StandardMaterial>,
 }
 
-fn build_palette(materials: &mut Assets<StandardMaterial>) -> MaterialPalette {
+/// Water palette entries below this index (fill < ~25%) use the froth texture.
+const FROTH_THRESHOLD: usize = WATER_PALETTE_SIZE / 4;
+
+fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>) -> MaterialPalette {
     let air = materials.add(Color::srgb(0.34, 0.49, 0.27));
     let wall = materials.add(Color::srgb(0.1, 0.1, 0.1));
     let spring = materials.add(Color::srgb(0.0, 0.8, 0.7));
@@ -45,7 +52,16 @@ fn build_palette(materials: &mut Assets<StandardMaterial>) -> MaterialPalette {
     let water: Vec<_> = (0..WATER_PALETTE_SIZE)
         .map(|i| {
             let fill = i as f32 / (WATER_PALETTE_SIZE - 1) as f32;
-            materials.add(Color::srgb(1.0 - fill, 1.0 - fill, 1.0))
+            let base_color = Color::srgb(1.0 - fill * 0.4, 1.0 - fill * 0.4, 1.0);
+            if i < FROTH_THRESHOLD {
+                materials.add(StandardMaterial {
+                    base_color,
+                    base_color_texture: Some(froth.clone()),
+                    ..default()
+                })
+            } else {
+                materials.add(base_color)
+            }
         })
         .collect();
 
@@ -102,6 +118,7 @@ fn setup_render(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut config_store: ResMut<GizmoConfigStore>,
+    texture_assets: Res<TextureAssets>,
 ) {
     let width = config.cols;
     let height = config.rows;
@@ -128,7 +145,7 @@ fn setup_render(
         .width = 2.0;
 
     // Build shared material palette
-    let palette = build_palette(&mut materials);
+    let palette = build_palette(&mut materials, texture_assets.froth_frame1.clone());
 
     // Shared cube mesh for all tiles
     let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
