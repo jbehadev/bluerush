@@ -2,18 +2,27 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+/// Maximum water mass a single cell can hold, in kilograms.
 pub const MAX_WATER_KG: f32 = 1000.0;
 
+/// The content of a single grid cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Cell {
+    /// Empty space — water and objects can move here freely.
     Air,
+    /// Water with a fill level in kg (0..=`MAX_WATER_KG`).
     Water(f32),
+    /// A movable solid block with the given weight in kg.
     Object(f32),
+    /// An immovable solid boundary — blocks all flow and movement.
     Wall,
-    Spring, // fixed water source; always holds MAX_WATER_KG
-    Drain,  // fixed water sink; always holds 0 kg
+    /// A permanent water source; always treated as holding `MAX_WATER_KG`.
+    Spring,
+    /// A permanent water sink; always treated as empty so water flows in.
+    Drain,
 }
 
+/// The simulation grid. Cells are stored in row-major order: index = `y * width + x`.
 pub struct Grid {
     pub width: usize,
     pub height: usize,
@@ -21,6 +30,8 @@ pub struct Grid {
 }
 
 impl Grid {
+    /// Create a new grid with border walls, a closed gate row at y=1, and a
+    /// pre-filled reservoir row at y=0. Interior cells start as `Air`.
     pub fn init(width: usize, height: usize) -> Grid {
         let mut grid = Grid {
             width,
@@ -51,10 +62,12 @@ impl Grid {
         grid
     }
 
+    /// Write a cell at grid coordinates `(x, y)`.
     pub fn set_cell(&mut self, x: usize, y: usize, cell: Cell) {
         self.cells[y * self.width + x] = cell;
     }
 
+    /// Read the cell at grid coordinates `(x, y)`.
     pub fn get_cell(&self, x: usize, y: usize) -> &Cell {
         &self.cells[y * self.width + x]
     }
@@ -77,6 +90,12 @@ fn flow_capacity(cell: &Cell) -> Option<f32> {
     }
 }
 
+/// Advance the water simulation by one tick using a delta-buffer diffusion algorithm.
+///
+/// Water flows from each cell toward any passable neighbor with a lower fill level.
+/// All transfers are accumulated in a delta buffer and applied simultaneously to
+/// prevent water creation from multiple writes to the same cell.
+/// Springs and drains are restored after the step so they are not overwritten.
 pub fn step_simulation(grid: &Grid) -> Vec<Cell> {
     let width = grid.width;
     let height = grid.height;
@@ -164,6 +183,16 @@ struct MoveIntent {
     fallback_dst: Option<usize>, // secondary direction to try if primary is blocked
 }
 
+/// Compute a per-cell depth-based pressure table.
+///
+/// Scans each column top-down from the inlet (y=0), accumulating the weight of
+/// water above. Cells deeper in a water column receive higher pressure values,
+/// which avoids the pressure-equalisation problem that arises when local fill
+/// levels are uniform across the grid.
+///
+/// An implicit inlet pressure of `MAX_WATER_KG * 3.0` is seeded at y=0 for every
+/// column so objects near the top row always feel some upward force. Walls clear
+/// the pressure accumulator, cutting off columns from the source above.
 pub fn build_depth_pressure(grid: &Grid) -> Vec<f32> {
     let width = grid.width;
     let height = grid.height;
@@ -251,6 +280,19 @@ pub fn build_flow_distance(grid: &Grid) -> Vec<u32> {
     dist
 }
 
+/// Advance object physics by one tick using a three-pass move-intent system.
+///
+/// **Pass 1** — Each object computes its desired move direction based on depth
+/// pressure (buoyancy) and horizontal pressure differences. A horizontal deadzone
+/// prevents jitter when lateral pressure is nearly balanced.
+///
+/// **Pass 2** — Conflicts are resolved: when multiple objects want the same
+/// destination, one is chosen randomly.
+///
+/// **Pass 3** — Winning moves are applied. Each mover tries its primary direction
+/// first; if blocked, it tries a fallback direction (e.g. sideways when UP is
+/// blocked by a ceiling). If `collision_destruction` is enabled, a mover that
+/// cannot escape will destroy itself and damage the blocking object instead.
 pub fn step_objects(grid: &mut Grid, rng: &mut impl Rng, collision_destruction: bool) {
     let width = grid.width;
     let height = grid.height;

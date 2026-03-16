@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 use crate::simulation::{Cell, Grid};
 
+/// A before/after snapshot of a single cell, used to build undo/redo actions.
 #[derive(Clone)]
 pub struct CellChange {
     pub x: usize,
@@ -10,10 +11,16 @@ pub struct CellChange {
     pub new: Cell,
 }
 
+/// A single undoable user action, consisting of one or more cell changes
+/// accumulated during a mouse stroke.
 pub struct Action {
     pub changes: Vec<CellChange>,
 }
 
+/// Undo/redo history for user edits. Capped at `MAX_UNDO` actions.
+///
+/// Changes are accumulated in a `pending` buffer while the mouse button is held,
+/// then committed as a single `Action` on mouse release.
 #[derive(Resource, Default)]
 pub struct UndoStack {
     undo: Vec<Action>,
@@ -75,6 +82,7 @@ impl UndoStack {
         self.pending.clear();
     }
 
+    /// Returns `true` if there are uncommitted cell changes from the current stroke.
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
