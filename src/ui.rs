@@ -871,11 +871,23 @@ fn update_status(
         .filter(|c| matches!(c, Cell::Object(_)))
         .count();
 
+    let building_count = grid
+        .cells
+        .iter()
+        .filter(|c| matches!(c, Cell::Building { .. }))
+        .count();
+
     let speed_str = format!("x{}", state.sim_speed);
 
     for mut text in &mut query {
-        **text = format!(
-            "FPS: {fps:.0}  |  Water: {water_str}  |  Objects: {object_count}  |  Speed: {speed_str}"
-        );
+        if building_count > 0 {
+            **text = format!(
+                "FPS: {fps:.0}  |  Water: {water_str}  |  Objects: {object_count}  |  Buildings: {building_count}  |  Speed: {speed_str}"
+            );
+        } else {
+            **text = format!(
+                "FPS: {fps:.0}  |  Water: {water_str}  |  Objects: {object_count}  |  Speed: {speed_str}"
+            );
+        }
     }
 }

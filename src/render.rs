@@ -44,6 +44,7 @@ pub struct MaterialPalette {
     pub wall: Handle<StandardMaterial>,
     pub spring: Handle<StandardMaterial>,
     pub drain: Handle<StandardMaterial>,
+    pub building: Handle<StandardMaterial>,
     pub water: Vec<Handle<StandardMaterial>>,
     pub objects: Vec<Handle<StandardMaterial>>,
     pub heatmap: Vec<Handle<StandardMaterial>>,
@@ -58,6 +59,8 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
     let wall = materials.add(Color::srgb(0.1, 0.1, 0.1));
     let spring = materials.add(Color::srgb(0.0, 0.8, 0.7));
     let drain = materials.add(Color::srgb(0.8, 0.4, 0.0));
+    // Warm tan/brown — distinct from blue water and grey objects
+    let building = materials.add(Color::srgb(0.76, 0.60, 0.42));
 
     let water: Vec<_> = (0..WATER_PALETTE_SIZE)
         .map(|i| {
@@ -96,6 +99,7 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
         wall,
         spring,
         drain,
+        building,
         water,
         objects,
         heatmap,
@@ -211,6 +215,7 @@ fn render_grid(
                 let idx = (t * (OBJECT_PALETTE_SIZE - 1) as f32).round() as usize;
                 (0.8, &palette.objects[idx])
             }
+            Cell::Building { .. } => (1.0, &palette.building),
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
@@ -245,6 +250,7 @@ fn render_heat_grid_3d(
             Cell::Spring => 1.0,
             Cell::Drain => 0.3,
             Cell::Object(_) => 0.8,
+            Cell::Building { .. } => 1.0,
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
@@ -262,6 +268,7 @@ fn cell_surface_y(cell: &Cell) -> f32 {
         Cell::Spring => 1.0,
         Cell::Drain => 0.3,
         Cell::Object(_) => 0.8,
+        Cell::Building { .. } => 1.0,
     };
     h * CUBE_HEIGHT
 }
@@ -382,7 +389,7 @@ fn compute_arrow_info(
             };
             p_left.max(p_right).max(p_below)
         }
-        Cell::Wall => return None,
+        Cell::Wall | Cell::Building { .. } => return None,
     };
 
     let net_y = (raw_pressure - weight).max(0.0);
@@ -457,6 +464,7 @@ fn draw_flow_arrows(
 
     let weight = match *selected {
         SelectedTool::Block(w) => w,
+        SelectedTool::Building { weight, .. } => weight,
         _ => 200.0,
     };
 
@@ -502,6 +510,7 @@ fn draw_hover_cursor(
         SelectedTool::Spring => 1.0,
         SelectedTool::Drain => 0.3,
         SelectedTool::Eraser => 0.15,
+        SelectedTool::Building { .. } => 1.0,
     };
     let scaled = h * CUBE_HEIGHT;
 
