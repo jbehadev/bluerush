@@ -18,6 +18,7 @@ struct SaveRequested;
 #[derive(Message)]
 struct LoadRequested;
 
+/// Root plugin that wires together the camera, UI, rendering, and all simulation systems.
 pub struct GridPlugin;
 
 impl Plugin for GridPlugin {
@@ -48,37 +49,58 @@ impl Plugin for GridPlugin {
 // Allow Grid (defined in simulation) to be used as a Bevy resource.
 impl Resource for Grid {}
 
+/// Pixel width reserved for the left-side UI panel. Clicks within this region are
+/// not forwarded to the grid.
 pub const PANEL_WIDTH: f32 = 120.0;
 
+/// Startup configuration loaded from `config.yaml` and shared as a Bevy resource.
 #[derive(Resource, Clone)]
 pub struct GridConfig {
+    /// Number of grid columns.
     pub cols: usize,
+    /// Number of grid rows.
     pub rows: usize,
+    /// Tile edge length in pixels (informational; used for save/load validation).
     pub tile_size: f32,
+    /// When true, objects that collide at speed destroy each other.
     pub collision_destruction: bool,
 }
 
+/// Controls which overlay is rendered on top of the grid.
 #[derive(Resource, PartialEq, Clone, Default)]
 pub enum ViewMode {
+    /// Standard cell colours.
     #[default]
     Normal,
+    /// Rainbow heatmap showing depth-based pressure values.
     Pressure,
+    /// Arrows showing predicted flow direction for the currently selected weight.
     FlowArrows,
 }
 
+/// Per-frame mutable simulation state, separate from `GridConfig` which is read-only.
 #[derive(Resource)]
 pub struct GameState {
+    /// Whether the inlet gate is open and water is flowing.
     pub water_flow: bool,
+    /// How many cells the gate has opened (used by `animate_gate`).
     pub gate_progress: usize,
+    /// Number of simulation ticks to run per rendered frame.
     pub sim_speed: u32,
+    /// Radius of the paint brush in cells (0 = single cell).
     pub brush_radius: u32,
 }
 
+/// The currently active placement tool.
 #[derive(Resource, PartialEq, Clone)]
 pub enum SelectedTool {
+    /// Place an immovable block with the given weight in kg.
     Block(f32),
+    /// Remove any cell, replacing it with `Air`.
     Eraser,
+    /// Place a `Spring` (permanent water source).
     Spring,
+    /// Place a `Drain` (permanent water sink).
     Drain,
 }
 

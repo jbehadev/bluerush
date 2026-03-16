@@ -146,6 +146,47 @@ src/
 ## Where We Left Off
 3D isometric rendering is fully working with material palette, camera controls, hover cursor gizmo, and save/load. Anti-oscillation fix applied to object physics.
 
+## System Schedule
+
+### Startup
+| System | Plugin | Purpose |
+|--------|--------|---------|
+| `setup` | GridPlugin | Insert `GameState`, `ViewMode`, `SelectedTool`, `Grid` resources |
+| `setup_camera` | CameraPlugin | Spawn 3D isometric `Camera3d` |
+| `setup_ui` | UiPlugin | Spawn all UI panel nodes and buttons |
+| `setup_render` | RenderPlugin | Spawn tile mesh entities, build `MaterialPalette` |
+
+### Update (GridPlugin)
+| System | Purpose |
+|--------|---------|
+| `simulate_objects` | Run `step_objects` × `sim_speed`; skipped when flow off |
+| `flow_water` | Fill top row with water at `MAX_WATER_KG` per tick |
+| `simulate_flow` | Run `step_simulation` × `sim_speed` (pressure diffusion) |
+| `handle_input` | Mouse place/erase, keyboard shortcuts, undo/redo, view toggle |
+| `animate_gate` | Open/close wall gate at top center one cell per frame |
+| `handle_save` / `handle_load` | Write `SaveRequested` / `LoadRequested` messages → `PendingFileOp` |
+| `poll_file_op` | Poll async file dialog thread; apply loaded grid |
+
+### Update (CameraPlugin)
+| `camera_controls` | Scroll-to-zoom, middle-click pan |
+
+### Update (UiPlugin)
+| `handle_weight_buttons` / `handle_eraser_button` / `handle_spring_button` / `handle_drain_button` | Tool selection buttons |
+| `update_tool_buttons` | Highlight active tool button |
+| `handle_inlet_toggle` / `update_inlet_button` | Flow on/off button |
+| `handle_view_toggle` / `update_view_buttons` | Normal / Pressure / FlowArrows toggle |
+| `handle_reset` | Reset grid button |
+| `handle_speed_buttons` / `update_speed_label` | Sim speed ±  |
+| `handle_brush_buttons` / `update_brush_label` | Brush radius ± |
+| `update_status` | Status bar text (fps, cell count) |
+
+### Update (RenderPlugin)
+| `render_grid` | Update tile transforms/materials from `Grid` each frame |
+| `draw_hover_cursor` | Yellow gizmo wireframe over hovered cells |
+| `draw_flow_arrows` | Gizmo arrows showing water flow direction (FlowArrows mode) |
+
+---
+
 ## What Comes Next
 - **Water rendering polish** — animated water surface, transparency, or wave effects
 - **Object interaction** — dragging placed objects, object-to-object collision

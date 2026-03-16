@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Application configuration loaded from `config.yaml` at startup.
+/// If the file does not exist, a default is written so the user can discover it.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     pub window_width: f32,
@@ -27,6 +29,8 @@ impl Default for AppConfig {
 const CONFIG_PATH: &str = "config.yaml";
 
 impl AppConfig {
+    /// Load config from `config.yaml`, falling back to `Default` on any error.
+    /// Writes the default file if it does not yet exist.
     pub fn load() -> Self {
         let path = Path::new(CONFIG_PATH);
         if path.exists() {

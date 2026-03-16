@@ -5,6 +5,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 use crate::grid::{GridConfig, PANEL_WIDTH};
 
+/// Sets up the isometric 3D camera and handles scroll-to-zoom and right-drag pan/orbit.
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
@@ -14,6 +15,8 @@ impl Plugin for CameraPlugin {
     }
 }
 
+/// Persistent camera orbit state. Updated by `camera_controls` and applied to the
+/// `Camera3d` `Transform` each frame when the state changes.
 #[derive(Resource)]
 pub struct CameraState {
     pub focus: Vec3,
@@ -41,6 +44,8 @@ impl CameraState {
     }
 }
 
+/// Spawn the `Camera3d` with an orthographic projection centred on the grid,
+/// and insert a `CameraState` resource with default orbit angles.
 pub fn setup_camera(mut commands: Commands, config: Res<GridConfig>) {
     let width = config.cols;
     let height = config.rows;

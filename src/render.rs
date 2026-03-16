@@ -4,6 +4,8 @@ use crate::grid::{GameState, GridConfig, PANEL_WIDTH, SelectedTool, ViewMode};
 use crate::simulation::{Cell, Grid, MAX_WATER_KG, build_depth_pressure, build_flow_distance};
 use crate::textures::TextureAssets;
 
+/// Spawns tile mesh entities and updates their transform/material each frame to
+/// reflect the current grid state.
 pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
@@ -16,18 +18,26 @@ impl Plugin for RenderPlugin {
     }
 }
 
+/// Number of pre-baked `StandardMaterial` handles for the water fill gradient.
 pub const WATER_PALETTE_SIZE: usize = 32;
+/// Number of pre-baked `StandardMaterial` handles for the pressure heatmap.
 pub const HEATMAP_PALETTE_SIZE: usize = 64;
+/// Number of pre-baked `StandardMaterial` handles for the object weight gradient.
 pub const OBJECT_PALETTE_SIZE: usize = 64;
-/// Height multiplier so cubes are visible relative to grid width
+/// World-space height of a fully-filled cell cube. Lower cells are scaled down proportionally.
 pub const CUBE_HEIGHT: f32 = 5.0;
 
+/// Marker component attached to every tile mesh entity, identifying its grid position.
 #[derive(Component)]
 pub struct Tile {
+    /// Column index (x axis).
     pub x: usize,
+    /// Row index (y axis, 0 = top/inlet row).
     pub y: usize,
 }
 
+/// Pre-created `StandardMaterial` handles for all cell types.
+/// Shared across all tile entities to enable draw-call batching.
 #[derive(Resource)]
 pub struct MaterialPalette {
     pub air: Handle<StandardMaterial>,
@@ -93,7 +103,7 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
     }
 }
 
-/// Maps t in [0,1] through a five-stop rainbow: blue -> cyan -> green -> yellow -> red.
+/// Maps `t` in \[0, 1\] through a five-stop rainbow: blue → cyan → green → yellow → red.
 fn pressure_color(t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
     let (r, g, b) = if t < 0.25 {
