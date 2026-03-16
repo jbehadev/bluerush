@@ -1,4 +1,6 @@
 use bevy::prelude::*;
+use bevy::render::mesh::{Indices, PrimitiveTopology};
+use bevy::render::render_asset::RenderAssetUsages;
 
 use crate::grid::{GameState, GridConfig, PANEL_WIDTH, SelectedTool, ViewMode};
 use crate::simulation::{Cell, Grid, MAX_WATER_KG, build_depth_pressure, build_flow_distance};
@@ -34,10 +36,19 @@ pub struct MaterialPalette {
     pub wall: Handle<StandardMaterial>,
     pub spring: Handle<StandardMaterial>,
     pub drain: Handle<StandardMaterial>,
+    pub building: Handle<StandardMaterial>,
     pub water: Vec<Handle<StandardMaterial>>,
     pub objects: Vec<Handle<StandardMaterial>>,
     pub heatmap: Vec<Handle<StandardMaterial>>,
     pub heatmap_zero: Handle<StandardMaterial>,
+}
+
+/// Shared mesh handles so tiles can swap between the standard cube and the
+/// house-shaped building mesh without allocating per-tile.
+#[derive(Resource)]
+pub struct MeshHandles {
+    pub cube: Handle<Mesh>,
+    pub house: Handle<Mesh>,
 }
 
 /// Water palette entries below this index (fill < ~25%) use the froth texture.
@@ -48,6 +59,12 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
     let wall = materials.add(Color::srgb(0.1, 0.1, 0.1));
     let spring = materials.add(Color::srgb(0.0, 0.8, 0.7));
     let drain = materials.add(Color::srgb(0.8, 0.4, 0.0));
+    // Warm tan/brown — distinct from blue water and grey objects
+    let building = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.76, 0.60, 0.42),
+        cull_mode: None, // render both faces of the custom mesh regardless of winding
+        ..default()
+    });
 
     let water: Vec<_> = (0..WATER_PALETTE_SIZE)
         .map(|i| {
@@ -86,11 +103,113 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
         wall,
         spring,
         drain,
+        building,
         water,
         objects,
         heatmap,
         heatmap_zero,
     }
+}
+
+/// Accumulates mesh geometry one face at a time, then converts to a Bevy Mesh.
+struct HouseMeshBuilder {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+impl HouseMeshBuilder {
+    fn new() -> Self {
+        Self {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
+
+    /// Append a quad (4 verts, 2 triangles) with a uniform face normal.
+    /// Winding: list vertices so (v1-v0)×(v2-v0) matches `normal`.
+    fn push_quad(&mut self, verts: [[f32; 3]; 4], n: [f32; 3]) {
+        let base = self.positions.len() as u32;
+        for &v in &verts {
+            self.positions.push(v);
+            self.normals.push(n);
+            self.uvs.push([0.0, 0.0]);
+        }
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// Append a single triangle with a uniform face normal.
+    fn push_tri(&mut self, verts: [[f32; 3]; 3], n: [f32; 3]) {
+        let base = self.positions.len() as u32;
+        for &v in &verts {
+            self.positions.push(v);
+            self.normals.push(n);
+            self.uvs.push([0.0, 0.0]);
+        }
+        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
+    fn build(self) -> Mesh {
+        let mut mesh =
+            Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
+        mesh.insert_indices(Indices::U32(self.indices));
+        mesh
+    }
+}
+
+/// Builds a house-shaped mesh in a 1×1×1 unit space centred at the origin.
+///
+/// - Body: y ∈ [-0.5, 0.1]  (60% of height)
+/// - Roof (gable prism): y ∈ [0.1, 0.5], ridge along z, peak at x=0
+///
+/// When the tile transform applies `scale.y = h * CUBE_HEIGHT` the mesh
+/// maintains its 60/40 body/roof proportions while fitting the standard
+/// `translation.y = scaled / 2.0` positioning convention.
+fn build_house_mesh() -> Mesh {
+    let mut b = HouseMeshBuilder::new();
+
+    // ── Body (box) ───────────────────────────────────────────────────────────
+    let (bx0, bx1) = (-0.5f32, 0.5f32);
+    let (by0, by1) = (-0.5f32, 0.1f32); // 60 % of total height
+    let (bz0, bz1) = (-0.5f32, 0.5f32);
+
+    b.push_quad([[bx1, by0, bz0], [bx0, by0, bz0], [bx0, by1, bz0], [bx1, by1, bz0]], [0.0, 0.0, -1.0]); // Front (-z)
+    b.push_quad([[bx0, by0, bz1], [bx1, by0, bz1], [bx1, by1, bz1], [bx0, by1, bz1]], [0.0, 0.0, 1.0]);  // Back (+z)
+    b.push_quad([[bx0, by0, bz0], [bx0, by0, bz1], [bx0, by1, bz1], [bx0, by1, bz0]], [-1.0, 0.0, 0.0]); // Left (-x)
+    b.push_quad([[bx1, by0, bz1], [bx1, by0, bz0], [bx1, by1, bz0], [bx1, by1, bz1]], [1.0, 0.0, 0.0]);  // Right (+x)
+    b.push_quad([[bx1, by0, bz1], [bx0, by0, bz1], [bx0, by0, bz0], [bx1, by0, bz0]], [0.0, -1.0, 0.0]); // Bottom (-y)
+
+    // ── Gable roof (triangular prism) ────────────────────────────────────────
+    let ry_base = 0.1f32;
+    let ry_peak = 0.5f32;
+    let rx_peak = 0.0f32;
+    let (rz0, rz1) = (-0.5f32, 0.5f32);
+
+    b.push_tri([[bx1, ry_base, rz0], [bx0, ry_base, rz0], [rx_peak, ry_peak, rz0]], [0.0, 0.0, -1.0]); // Front tri (-z)
+    b.push_tri([[bx0, ry_base, rz1], [bx1, ry_base, rz1], [rx_peak, ry_peak, rz1]], [0.0, 0.0, 1.0]);  // Back tri (+z)
+
+    // Left slope (-x side): outward normal ≈ (-0.625, 0.781, 0)
+    let slope_len = (0.4f32 * 0.4 + 0.5 * 0.5_f32).sqrt();
+    let ln = [-0.4 / slope_len, 0.5 / slope_len, 0.0f32];
+    b.push_quad(
+        [[bx0, ry_base, rz0], [bx0, ry_base, rz1], [rx_peak, ry_peak, rz1], [rx_peak, ry_peak, rz0]],
+        ln,
+    );
+    // Right slope (+x side): outward normal ≈ (0.625, 0.781, 0)
+    let rn = [0.4 / slope_len, 0.5 / slope_len, 0.0f32];
+    b.push_quad(
+        [[bx1, ry_base, rz1], [bx1, ry_base, rz0], [rx_peak, ry_peak, rz0], [rx_peak, ry_peak, rz1]],
+        rn,
+    );
+
+    b.build()
 }
 
 /// Maps t in [0,1] through a five-stop rainbow: blue -> cyan -> green -> yellow -> red.
@@ -147,8 +266,9 @@ fn setup_render(
     // Build shared material palette
     let palette = build_palette(&mut materials, texture_assets.froth_frame1.clone());
 
-    // Shared cube mesh for all tiles
+    // Shared meshes — tiles swap between these at runtime
     let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let house_mesh = meshes.add(build_house_mesh());
 
     for row in 0..height {
         for col in 0..width {
@@ -162,13 +282,15 @@ fn setup_render(
         }
     }
 
+    commands.insert_resource(MeshHandles { cube: cube_mesh, house: house_mesh });
     commands.insert_resource(palette);
 }
 
 fn render_grid(
     grid: Res<Grid>,
-    mut tile_query: Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut tile_query: Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>, &mut Mesh3d)>,
     palette: Res<MaterialPalette>,
+    mesh_handles: Res<MeshHandles>,
     view_mode: Res<ViewMode>,
     state: Res<GameState>,
 ) {
@@ -178,68 +300,72 @@ fn render_grid(
     }
 
     if *view_mode == ViewMode::Pressure {
-        render_heat_grid_3d(&grid, &mut tile_query, &palette);
+        render_heat_grid_3d(&grid, &mut tile_query, &palette, &mesh_handles);
         return;
     }
-    for (tile, mut transform, mut mat) in &mut tile_query {
+    for (tile, mut transform, mut mat, mut tile_mesh) in &mut tile_query {
         let cell = &grid.cells[tile.y * grid.width + tile.x];
-        let (h, handle) = match cell {
-            Cell::Air => (0.1, &palette.air),
+        let (h, mat_handle, mesh_handle) = match cell {
+            Cell::Air => (0.1, palette.air.clone(), mesh_handles.cube.clone()),
             Cell::Water(kg) => {
                 let fill = kg / MAX_WATER_KG;
-                let idx = (fill * (WATER_PALETTE_SIZE - 1) as f32).round() as usize;
-                (
-                    0.1 + fill * 0.9,
-                    &palette.water[idx.min(WATER_PALETTE_SIZE - 1)],
-                )
+                let idx = ((fill * (WATER_PALETTE_SIZE - 1) as f32).round() as usize)
+                    .min(WATER_PALETTE_SIZE - 1);
+                (0.1 + fill * 0.9, palette.water[idx].clone(), mesh_handles.cube.clone())
             }
-            Cell::Wall => (1.0, &palette.wall),
-            Cell::Spring => (1.0, &palette.spring),
-            Cell::Drain => (0.3, &palette.drain),
+            Cell::Wall => (1.0, palette.wall.clone(), mesh_handles.cube.clone()),
+            Cell::Spring => (1.0, palette.spring.clone(), mesh_handles.cube.clone()),
+            Cell::Drain => (0.3, palette.drain.clone(), mesh_handles.cube.clone()),
             Cell::Object(w) => {
                 let t = (w / 5000.0).clamp(0.0, 1.0);
-                let idx = (t * (OBJECT_PALETTE_SIZE - 1) as f32).round() as usize;
-                (0.8, &palette.objects[idx])
+                let idx = ((t * (OBJECT_PALETTE_SIZE - 1) as f32).round() as usize)
+                    .min(OBJECT_PALETTE_SIZE - 1);
+                (0.8, palette.objects[idx].clone(), mesh_handles.cube.clone())
             }
+            Cell::Building { .. } => (0.9, palette.building.clone(), mesh_handles.house.clone()),
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
         transform.translation.y = scaled / 2.0;
-        mat.0 = handle.clone();
+        mat.0 = mat_handle;
+        tile_mesh.0 = mesh_handle;
     }
 }
 
 fn render_heat_grid_3d(
     grid: &Grid,
-    tile_query: &mut Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
+    tile_query: &mut Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>, &mut Mesh3d)>,
     palette: &MaterialPalette,
+    mesh_handles: &MeshHandles,
 ) {
     let depth = build_depth_pressure(grid);
     let max = depth.iter().cloned().fold(1.0f32, f32::max);
 
-    for (tile, mut transform, mut mat) in tile_query.iter_mut() {
+    for (tile, mut transform, mut mat, mut tile_mesh) in tile_query.iter_mut() {
         let idx = tile.y * grid.width + tile.x;
         let val = depth[idx];
-        let handle = if val > 0.0 {
+        let mat_handle = if val > 0.0 {
             let t = val / max;
             let i = (t * (HEATMAP_PALETTE_SIZE - 1) as f32).round() as usize;
-            &palette.heatmap[i.min(HEATMAP_PALETTE_SIZE - 1)]
+            palette.heatmap[i.min(HEATMAP_PALETTE_SIZE - 1)].clone()
         } else {
-            &palette.heatmap_zero
+            palette.heatmap_zero.clone()
         };
 
-        let h = match &grid.cells[idx] {
-            Cell::Air => 0.1,
-            Cell::Water(kg) => 0.1 + (kg / MAX_WATER_KG) * 0.9,
-            Cell::Wall => 1.0,
-            Cell::Spring => 1.0,
-            Cell::Drain => 0.3,
-            Cell::Object(_) => 0.8,
+        let (h, mesh_handle) = match &grid.cells[idx] {
+            Cell::Air => (0.1, mesh_handles.cube.clone()),
+            Cell::Water(kg) => (0.1 + (kg / MAX_WATER_KG) * 0.9, mesh_handles.cube.clone()),
+            Cell::Wall => (1.0, mesh_handles.cube.clone()),
+            Cell::Spring => (1.0, mesh_handles.cube.clone()),
+            Cell::Drain => (0.3, mesh_handles.cube.clone()),
+            Cell::Object(_) => (0.8, mesh_handles.cube.clone()),
+            Cell::Building { .. } => (0.9, mesh_handles.house.clone()),
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
         transform.translation.y = scaled / 2.0;
-        mat.0 = handle.clone();
+        mat.0 = mat_handle;
+        tile_mesh.0 = mesh_handle;
     }
 }
 
@@ -252,6 +378,7 @@ fn cell_surface_y(cell: &Cell) -> f32 {
         Cell::Spring => 1.0,
         Cell::Drain => 0.3,
         Cell::Object(_) => 0.8,
+        Cell::Building { .. } => 0.9,
     };
     h * CUBE_HEIGHT
 }
@@ -372,7 +499,7 @@ fn compute_arrow_info(
             };
             p_left.max(p_right).max(p_below)
         }
-        Cell::Wall => return None,
+        Cell::Wall | Cell::Building { .. } => return None,
     };
 
     let net_y = (raw_pressure - weight).max(0.0);
@@ -447,6 +574,7 @@ fn draw_flow_arrows(
 
     let weight = match *selected {
         SelectedTool::Block(w) => w,
+        SelectedTool::Building { weight, .. } => weight,
         _ => 200.0,
     };
 
@@ -492,6 +620,7 @@ fn draw_hover_cursor(
         SelectedTool::Spring => 1.0,
         SelectedTool::Drain => 0.3,
         SelectedTool::Eraser => 0.15,
+        SelectedTool::Building { .. } => 0.9,
     };
     let scaled = h * CUBE_HEIGHT;
 
