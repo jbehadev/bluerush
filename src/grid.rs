@@ -89,6 +89,7 @@ pub struct GameState {
     pub sim_speed: u32,
     /// Radius of the paint brush in cells (0 = single cell).
     pub brush_radius: u32,
+    pub drag_start: Option<(usize, usize)>,
 }
 
 /// The currently active placement tool.
@@ -118,6 +119,7 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
         gate_progress: 0,
         sim_speed: 1,
         brush_radius: 0,
+        drag_start: None,
     });
     commands.init_resource::<ViewMode>();
     commands.insert_resource(SelectedTool::Block(200.0));
@@ -146,10 +148,34 @@ fn handle_input(
         || keyboard.pressed(KeyCode::ControlRight)
         || keyboard.pressed(KeyCode::SuperLeft)
         || keyboard.pressed(KeyCode::SuperRight);
+    let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+
+    if mouse.just_pressed(MouseButton::Left) {
+        if let Some(cursor_pos) = window.cursor_position() {
+            if let Some((cx, cy)) = find_cursor_cell(cursor_pos, camera, camera_transform, &grid) {
+                state.drag_start = Some((cx, cy));
+            }
+        }
+    }
 
     if mouse.pressed(MouseButton::Left) {
         if let Some(cursor_pos) = window.cursor_position() {
-            if let Some((cx, cy)) = find_cursor_cell(cursor_pos, camera, camera_transform, &grid) {
+            if let Some((mut cx, mut cy)) =
+                find_cursor_cell(cursor_pos, camera, camera_transform, &grid)
+            {
+                // When shift is held, constrain to the dominant axis from drag start
+                if shift {
+                    if let Some((sx, sy)) = state.drag_start {
+                        let dx = (cx as isize - sx as isize).unsigned_abs();
+                        let dy = (cy as isize - sy as isize).unsigned_abs();
+                        if dx >= dy {
+                            cy = sy; // horizontal line
+                        } else {
+                            cx = sx; // vertical line
+                        }
+                    }
+                }
+
                 let r = state.brush_radius as usize;
                 for dy in 0..=(r * 2) {
                     for dx in 0..=(r * 2) {
@@ -190,12 +216,14 @@ fn handle_input(
         }
     }
     // Commit pending undo changes when mouse is released
-    if mouse.just_released(MouseButton::Left) && undo_stack.has_pending() {
-        undo_stack.commit();
+    if mouse.just_released(MouseButton::Left) {
+        state.drag_start = None;
+        if undo_stack.has_pending() {
+            undo_stack.commit();
+        }
     }
 
     // Undo/Redo shortcuts: Cmd+Z / Cmd+Shift+Z
-    let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
     if ctrl && keyboard.just_pressed(KeyCode::KeyZ) {
         if shift {
             undo_stack.redo(&mut grid);
