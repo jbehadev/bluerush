@@ -20,6 +20,9 @@ pub enum Cell {
     Spring,
     /// A permanent water sink; always treated as empty so water flows in.
     Drain,
+    /// A destructible building. Collapses into 3 `Object` debris pieces when
+    /// the depth pressure at its cell reaches or exceeds `threshold`.
+    Building { weight: f32, threshold: f32 },
 }
 
 /// The simulation grid. Cells are stored in row-major order: index = `y * width + x`.
@@ -86,7 +89,7 @@ fn flow_capacity(cell: &Cell) -> Option<f32> {
         Cell::Water(f) => Some(*f),
         Cell::Air => Some(0.0),
         Cell::Drain => Some(0.0), // drain appears empty — water always flows in
-        _ => None,
+        Cell::Object(_) | Cell::Wall | Cell::Spring | Cell::Building { .. } => None,
     }
 }
 
@@ -147,11 +150,14 @@ pub fn step_simulation(grid: &Grid) -> Vec<Cell> {
         };
     }
 
-    // Preserve spring and drain cells — they are permanent fixtures
+    // Preserve spring, drain, and building cells — they are permanent fixtures
     for i in 0..new_cells.len() {
         match grid.cells[i] {
             Cell::Spring => new_cells[i] = Cell::Spring,
             Cell::Drain => new_cells[i] = Cell::Drain,
+            Cell::Building { weight, threshold } => {
+                new_cells[i] = Cell::Building { weight, threshold }
+            }
             _ => {}
         }
     }
@@ -225,6 +231,11 @@ pub fn build_depth_pressure(grid: &Grid) -> Vec<f32> {
                     depth[y * width + x] = 0.0;
                     water_below.clear(); // walls block pressure from above
                 }
+                Cell::Building { .. } => {
+                    // Store incoming pressure so collapse logic can compare against threshold.
+                    depth[y * width + x] = pressure;
+                    water_below.clear(); // buildings block the pressure column like walls
+                }
                 Cell::Air | Cell::Drain => {
                     water_below.clear();
                     depth[y * width + x] = 0.0;
@@ -268,7 +279,7 @@ pub fn build_flow_distance(grid: &Grid) -> Vec<u32> {
                 continue;
             }
             match grid.cells[nidx] {
-                Cell::Wall => {} // walls block flow path
+                Cell::Wall | Cell::Building { .. } => {} // walls and buildings block flow path
                 _ => {
                     dist[nidx] = d + 1;
                     queue.push_back(nidx);
@@ -484,7 +495,7 @@ pub fn step_objects(grid: &mut Grid, rng: &mut impl Rng, collision_destruction: 
         // we may mutate new_cells below for collision destruction.
         let effective_dst = {
             let is_blocked = |idx: usize| -> bool {
-                matches!(new_cells[idx], Cell::Wall | Cell::Spring | Cell::Drain)
+                matches!(new_cells[idx], Cell::Wall | Cell::Spring | Cell::Drain | Cell::Building { .. })
                     || (matches!(new_cells[idx], Cell::Object(_)) && !moved_srcs.contains(&idx))
             };
             let primary_hits_object = matches!(new_cells[intent.dst], Cell::Object(_))
@@ -528,6 +539,64 @@ pub fn step_objects(grid: &mut Grid, rng: &mut impl Rng, collision_destruction: 
     }
 
     grid.cells = new_cells;
+}
+
+/// Check every `Building` cell and collapse those where the depth pressure
+/// exceeds the building's `threshold`. Collapse replaces the building with `Air`
+/// and spawns up to 3 `Object(weight / 3.0)` debris pieces into neighbouring
+/// cells (tries left → right → above, skipping `Wall`, `Spring`, `Drain`, and
+/// other `Building` cells).
+pub fn step_buildings(grid: &mut Grid) {
+    let width = grid.width;
+    let height = grid.height;
+    let depth = build_depth_pressure(grid);
+
+    // Collect buildings to collapse — don't mutate while reading
+    let to_collapse: Vec<(usize, usize, f32)> = grid
+        .cells
+        .iter()
+        .enumerate()
+        .filter_map(|(i, cell)| {
+            if let Cell::Building { weight, threshold } = cell {
+                if depth[i] >= *threshold {
+                    Some((i % width, i / width, *weight))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (bx, by, weight) in to_collapse {
+        // Replace building with air
+        grid.set_cell(bx, by, Cell::Air);
+
+        // Candidate neighbour directions: left, right, above
+        let debris_weight = weight / 3.0;
+        let candidates: [(isize, isize); 3] = [(-1, 0), (1, 0), (0, 1)];
+        let mut spawned = 0;
+        for (ddx, ddy) in candidates {
+            if spawned >= 3 {
+                break;
+            }
+            let nx = bx as isize + ddx;
+            let ny = by as isize + ddy;
+            if nx < 0 || ny < 0 || nx >= width as isize || ny >= height as isize {
+                continue;
+            }
+            let nx = nx as usize;
+            let ny = ny as usize;
+            match grid.get_cell(nx, ny) {
+                Cell::Wall | Cell::Spring | Cell::Drain | Cell::Building { .. } => continue,
+                _ => {
+                    grid.set_cell(nx, ny, Cell::Object(debris_weight));
+                    spawned += 1;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -915,5 +984,92 @@ mod tests {
             matches!(grid.cells[1 * 4 + 2], Cell::Air),
             "victim (200 kg) should also be destroyed when mover outweighs it"
         );
+    }
+
+    // ── Building tests ────────────────────────────────────────────────────────
+
+    /// Building with pressure BELOW threshold should NOT collapse.
+    #[test]
+    fn building_survives_below_threshold() {
+        // 3-wide, 3-tall grid.
+        // y=0: Water(MAX_WATER_KG) — provides pressure
+        // y=1: Building { weight=3000, threshold=9999 } — threshold unreachable
+        // y=2: Air
+        let width = 3;
+        let height = 3;
+        let mut cells = vec![Cell::Air; width * height];
+        cells[0 * width + 1] = Cell::Water(MAX_WATER_KG);
+        cells[1 * width + 1] = Cell::Building { weight: 3000.0, threshold: 9999.0 };
+        let mut grid = make_grid(width, height, cells);
+
+        step_buildings(&mut grid);
+
+        assert!(
+            matches!(grid.cells[1 * width + 1], Cell::Building { .. }),
+            "building should survive below threshold"
+        );
+    }
+
+    /// Building collapses when pressure >= threshold, spawning exactly 3 debris.
+    #[test]
+    fn building_collapses_spawns_three_debris() {
+        // 5-wide, 5-tall grid with walls on left/right borders.
+        // y=0: Water(MAX_WATER_KG) across all interior — high pressure
+        // y=1: Water(MAX_WATER_KG)
+        // y=2: Building at x=2 — threshold low so it collapses
+        //       neighbours: x=1 (Air), x=3 (Air), (x=2,y=3) Air
+        let width = 5;
+        let height = 5;
+        let mut cells = vec![Cell::Air; width * height];
+        // pressure source rows
+        for x in 0..width {
+            cells[0 * width + x] = Cell::Water(MAX_WATER_KG);
+            cells[1 * width + x] = Cell::Water(MAX_WATER_KG);
+        }
+        cells[2 * width + 2] = Cell::Building { weight: 3000.0, threshold: 1.0 };
+        let mut grid = make_grid(width, height, cells);
+
+        step_buildings(&mut grid);
+
+        // Building replaced with Air
+        assert!(
+            matches!(grid.cells[2 * width + 2], Cell::Air),
+            "building cell should be Air after collapse"
+        );
+
+        // Count debris objects
+        let debris_count = grid
+            .cells
+            .iter()
+            .filter(|c| matches!(c, Cell::Object(_)))
+            .count();
+        assert_eq!(debris_count, 3, "collapse should spawn exactly 3 debris pieces");
+    }
+
+    /// Each debris piece weighs weight / 3.0.
+    #[test]
+    fn building_debris_weight_is_one_third() {
+        let width = 5;
+        let height = 5;
+        let mut cells = vec![Cell::Air; width * height];
+        for x in 0..width {
+            cells[0 * width + x] = Cell::Water(MAX_WATER_KG);
+            cells[1 * width + x] = Cell::Water(MAX_WATER_KG);
+        }
+        let building_weight = 3000.0f32;
+        cells[2 * width + 2] = Cell::Building { weight: building_weight, threshold: 1.0 };
+        let mut grid = make_grid(width, height, cells);
+
+        step_buildings(&mut grid);
+
+        let expected = building_weight / 3.0;
+        for cell in &grid.cells {
+            if let Cell::Object(w) = cell {
+                assert!(
+                    (w - expected).abs() < 0.001,
+                    "debris weight should be {expected} kg, got {w}"
+                );
+            }
+        }
     }
 }
