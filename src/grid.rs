@@ -1,7 +1,7 @@
 use crate::render::find_cursor_cell;
 use crate::persistence;
 use crate::simulation::{
-    Cell, Grid, MAX_WATER_KG, build_depth_pressure, step_objects, step_simulation,
+    Cell, Grid, MAX_WATER_KG, build_depth_pressure, step_buildings, step_objects, step_simulation,
 };
 use rand::thread_rng;
 use crate::undo::UndoStack;
@@ -34,6 +34,7 @@ impl Plugin for GridPlugin {
                 Update,
                 (
                     simulate_objects,
+                    simulate_buildings_system,
                     flow_water,
                     simulate_flow,
                     handle_input,
@@ -103,6 +104,8 @@ pub enum SelectedTool {
     Spring,
     /// Place a `Drain` (permanent water sink).
     Drain,
+    /// Place a destructible `Building` that collapses under water pressure.
+    Building { weight: f32, threshold: f32 },
 }
 
 #[derive(Resource, Default)]
@@ -202,6 +205,14 @@ fn handle_input(
                                 {
                                     Some(Cell::Drain)
                                 }
+                                SelectedTool::Building { weight, threshold }
+                                    if !matches!(
+                                        grid.get_cell(bx, by),
+                                        Cell::Building { .. }
+                                    ) =>
+                                {
+                                    Some(Cell::Building { weight, threshold })
+                                }
                                 _ => None,
                             };
                             if let Some(new) = new_cell {
@@ -264,6 +275,9 @@ fn handle_input(
     }
     if keyboard.just_pressed(KeyCode::KeyD) && !ctrl {
         *selected = SelectedTool::Drain;
+    }
+    if keyboard.just_pressed(KeyCode::KeyB) {
+        *selected = SelectedTool::Building { weight: 3000.0, threshold: 2500.0 };
     }
     if keyboard.just_pressed(KeyCode::KeyS) && ctrl {
         save_events.write(SaveRequested);
@@ -342,6 +356,7 @@ fn flow_water(mut grid: ResMut<Grid>, state: Res<GameState>) {
             Cell::Wall => Cell::Wall,
             Cell::Spring => Cell::Spring,
             Cell::Drain => Cell::Drain,
+            Cell::Building { weight, threshold } => Cell::Building { weight, threshold },
         };
         grid.set_cell(x, 0, new_cell);
     }
@@ -354,6 +369,15 @@ fn simulate_objects(mut grid: ResMut<Grid>, state: Res<GameState>, config: Res<G
     let mut rng = thread_rng();
     for _ in 0..state.sim_speed {
         step_objects(&mut grid, &mut rng, config.collision_destruction);
+    }
+}
+
+fn simulate_buildings_system(mut grid: ResMut<Grid>, state: Res<GameState>) {
+    if !state.water_flow {
+        return;
+    }
+    for _ in 0..state.sim_speed {
+        step_buildings(&mut grid);
     }
 }
 
