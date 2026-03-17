@@ -15,6 +15,7 @@ impl Plugin for UiPlugin {
                 handle_eraser_button,
                 handle_spring_button,
                 handle_drain_button,
+                handle_building_button,
                 update_tool_buttons,
                 handle_inlet_toggle,
                 update_inlet_button,
@@ -42,6 +43,9 @@ struct SpringButton;
 
 #[derive(Component)]
 struct DrainButton;
+
+#[derive(Component)]
+struct BuildingButton;
 
 #[derive(Component)]
 pub struct InletButton;
@@ -294,6 +298,62 @@ fn setup_ui(mut commands: Commands) {
                             });
                         btn.spawn((
                             Text::new("Drain"),
+                            TextFont {
+                                font_size: 9.0,
+                                ..default()
+                            },
+                            TextColor(Color::WHITE),
+                        ));
+                    });
+
+                    // Building tool button — warm tan house icon
+                    grid.spawn((
+                        Button,
+                        Node {
+                            width: Val::Px(50.0),
+                            height: Val::Px(56.0),
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::FlexEnd,
+                            padding: UiRect::bottom(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.55, 0.55, 0.58)),
+                        BuildingButton,
+                    ))
+                    .with_children(|btn| {
+                        // House-shaped icon: narrow roof strip + wider body
+                        btn.spawn((Node {
+                            width: Val::Px(50.0),
+                            height: Val::Px(38.0),
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            row_gap: Val::Px(1.0),
+                            ..default()
+                        },))
+                            .with_children(|icon| {
+                                // Roof: narrower, darker strip on top
+                                icon.spawn((
+                                    Node {
+                                        width: Val::Px(18.0),
+                                        height: Val::Px(5.0),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgb(0.55, 0.38, 0.22)),
+                                ));
+                                // Body: wider, warm tan rectangle
+                                icon.spawn((
+                                    Node {
+                                        width: Val::Px(14.0),
+                                        height: Val::Px(10.0),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgb(0.76, 0.60, 0.42)),
+                                ));
+                            });
+                        btn.spawn((
+                            Text::new("Build"),
                             TextFont {
                                 font_size: 9.0,
                                 ..default()
@@ -656,6 +716,17 @@ fn handle_drain_button(
     }
 }
 
+fn handle_building_button(
+    q: Query<&Interaction, (Changed<Interaction>, With<BuildingButton>)>,
+    mut selected: ResMut<SelectedTool>,
+) {
+    for interaction in &q {
+        if *interaction == Interaction::Pressed {
+            *selected = SelectedTool::Building { weight: 3000.0, threshold: 2500.0 };
+        }
+    }
+}
+
 fn update_tool_buttons(
     mut weight_query: Query<
         (&WeightButton, &mut BackgroundColor),
@@ -663,6 +734,7 @@ fn update_tool_buttons(
             Without<EraserButton>,
             Without<SpringButton>,
             Without<DrainButton>,
+            Without<BuildingButton>,
         ),
     >,
     mut eraser_query: Query<
@@ -671,10 +743,18 @@ fn update_tool_buttons(
             With<EraserButton>,
             Without<SpringButton>,
             Without<DrainButton>,
+            Without<BuildingButton>,
         ),
     >,
-    mut spring_query: Query<&mut BackgroundColor, (With<SpringButton>, Without<DrainButton>)>,
-    mut drain_query: Query<&mut BackgroundColor, With<DrainButton>>,
+    mut spring_query: Query<
+        &mut BackgroundColor,
+        (With<SpringButton>, Without<DrainButton>, Without<BuildingButton>),
+    >,
+    mut drain_query: Query<
+        &mut BackgroundColor,
+        (With<DrainButton>, Without<BuildingButton>),
+    >,
+    mut building_query: Query<&mut BackgroundColor, With<BuildingButton>>,
     selected: Res<SelectedTool>,
 ) {
     if !selected.is_changed() {
@@ -706,6 +786,13 @@ fn update_tool_buttons(
     }
     for mut color in &mut drain_query {
         *color = if *selected == SelectedTool::Drain {
+            BackgroundColor(selected_color)
+        } else {
+            BackgroundColor(unselected_color)
+        };
+    }
+    for mut color in &mut building_query {
+        *color = if matches!(*selected, SelectedTool::Building { .. }) {
             BackgroundColor(selected_color)
         } else {
             BackgroundColor(unselected_color)
