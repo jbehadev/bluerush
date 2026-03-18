@@ -1,4 +1,6 @@
 use bevy::prelude::*;
+use bevy_asset::RenderAssetUsages;
+use bevy_mesh::{Indices, PrimitiveTopology};
 
 use crate::grid::{GameState, GridConfig, PANEL_WIDTH, SelectedTool, ViewMode};
 use crate::simulation::{Cell, Grid, MAX_WATER_KG, build_depth_pressure, build_flow_distance};
@@ -51,8 +53,101 @@ pub struct MaterialPalette {
     pub heatmap_zero: Handle<StandardMaterial>,
 }
 
+/// Mesh handles for cell types that need non-cuboid shapes.
+#[derive(Resource)]
+pub struct MeshHandles {
+    pub cube: Handle<Mesh>,
+    pub house: Handle<Mesh>,
+}
+
 /// Water palette entries below this index (fill < ~25%) use the froth texture.
 const FROTH_THRESHOLD: usize = WATER_PALETTE_SIZE / 4;
+
+fn house_push_quad(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    verts: [[f32; 3]; 4],
+    normal: [f32; 3],
+) {
+    let base = positions.len() as u32;
+    for v in &verts {
+        positions.push(*v);
+        normals.push(normal);
+        uvs.push([0.0, 0.0]);
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn house_push_tri(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    verts: [[f32; 3]; 3],
+    normal: [f32; 3],
+) {
+    let base = positions.len() as u32;
+    for v in &verts {
+        positions.push(*v);
+        normals.push(normal);
+        uvs.push([0.0, 0.0]);
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2]);
+}
+
+/// Builds a house-shaped mesh in unit space (fits inside a 1×1×1 cube centred at origin).
+///
+/// Body occupies y ∈ [-0.5, 0.1] (60% of height); gable roof occupies y ∈ [0.1, 0.5]
+/// with the ridge peak at x=0.
+fn build_house_mesh() -> Mesh {
+    let bt: f32 = 0.1; // body top / eave level
+    let rp: f32 = 0.5; // roof ridge peak
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    // Body faces
+    house_push_quad(&mut positions, &mut normals, &mut uvs, &mut indices,
+        [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]],
+        [0.0, -1.0, 0.0]);
+    house_push_quad(&mut positions, &mut normals, &mut uvs, &mut indices,
+        [[-0.5, -0.5, -0.5], [-0.5, bt, -0.5], [0.5, bt, -0.5], [0.5, -0.5, -0.5]],
+        [0.0, 0.0, -1.0]);
+    house_push_quad(&mut positions, &mut normals, &mut uvs, &mut indices,
+        [[0.5, -0.5, 0.5], [0.5, bt, 0.5], [-0.5, bt, 0.5], [-0.5, -0.5, 0.5]],
+        [0.0, 0.0, 1.0]);
+    house_push_quad(&mut positions, &mut normals, &mut uvs, &mut indices,
+        [[-0.5, -0.5, 0.5], [-0.5, bt, 0.5], [-0.5, bt, -0.5], [-0.5, -0.5, -0.5]],
+        [-1.0, 0.0, 0.0]);
+    house_push_quad(&mut positions, &mut normals, &mut uvs, &mut indices,
+        [[0.5, -0.5, -0.5], [0.5, bt, -0.5], [0.5, bt, 0.5], [0.5, -0.5, 0.5]],
+        [1.0, 0.0, 0.0]);
+
+    // Roof faces
+    let dh = rp - bt;
+    let lm = (0.25f32 + dh * dh).sqrt();
+    let ln = [-dh / lm, 0.5 / lm, 0.0];
+    let rn = [dh / lm, 0.5 / lm, 0.0];
+
+    house_push_quad(&mut positions, &mut normals, &mut uvs, &mut indices,
+        [[-0.5, bt, -0.5], [0.0, rp, -0.5], [0.0, rp, 0.5], [-0.5, bt, 0.5]], ln);
+    house_push_quad(&mut positions, &mut normals, &mut uvs, &mut indices,
+        [[0.5, bt, 0.5], [0.0, rp, 0.5], [0.0, rp, -0.5], [0.5, bt, -0.5]], rn);
+    house_push_tri(&mut positions, &mut normals, &mut uvs, &mut indices,
+        [[-0.5, bt, -0.5], [0.5, bt, -0.5], [0.0, rp, -0.5]], [0.0, 0.0, -1.0]);
+    house_push_tri(&mut positions, &mut normals, &mut uvs, &mut indices,
+        [[0.5, bt, 0.5], [-0.5, bt, 0.5], [0.0, rp, 0.5]], [0.0, 0.0, 1.0]);
+
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(indices))
+}
 
 fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>) -> MaterialPalette {
     let air = materials.add(Color::srgb(0.34, 0.49, 0.27));
@@ -60,7 +155,11 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
     let spring = materials.add(Color::srgb(0.0, 0.8, 0.7));
     let drain = materials.add(Color::srgb(0.8, 0.4, 0.0));
     // Warm tan/brown — distinct from water blue, object grey, wall dark, spring teal, drain orange
-    let building = materials.add(Color::srgb(0.76, 0.60, 0.42));
+    let building = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.76, 0.60, 0.42),
+        cull_mode: None, // render both sides so the gable roof looks solid
+        ..default()
+    });
 
     let water: Vec<_> = (0..WATER_PALETTE_SIZE)
         .map(|i| {
@@ -161,8 +260,9 @@ fn setup_render(
     // Build shared material palette
     let palette = build_palette(&mut materials, texture_assets.froth_frame1.clone());
 
-    // Shared cube mesh for all tiles
+    // Shared mesh handles
     let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let house_mesh = meshes.add(build_house_mesh());
 
     for row in 0..height {
         for col in 0..width {
@@ -177,12 +277,22 @@ fn setup_render(
     }
 
     commands.insert_resource(palette);
+    commands.insert_resource(MeshHandles {
+        cube: cube_mesh,
+        house: house_mesh,
+    });
 }
 
 fn render_grid(
     grid: Res<Grid>,
-    mut tile_query: Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut tile_query: Query<(
+        &Tile,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+        &mut Mesh3d,
+    )>,
     palette: Res<MaterialPalette>,
+    mesh_handles: Res<MeshHandles>,
     view_mode: Res<ViewMode>,
     state: Res<GameState>,
 ) {
@@ -192,10 +302,10 @@ fn render_grid(
     }
 
     if *view_mode == ViewMode::Pressure {
-        render_heat_grid_3d(&grid, &mut tile_query, &palette);
+        render_heat_grid_3d(&grid, &mut tile_query, &palette, &mesh_handles);
         return;
     }
-    for (tile, mut transform, mut mat) in &mut tile_query {
+    for (tile, mut transform, mut mat, mut mesh3d) in &mut tile_query {
         let cell = &grid.cells[tile.y * grid.width + tile.x];
         let (h, handle) = match cell {
             Cell::Air => (0.1, &palette.air),
@@ -221,18 +331,29 @@ fn render_grid(
         transform.scale.y = scaled;
         transform.translation.y = scaled / 2.0;
         mat.0 = handle.clone();
+        mesh3d.0 = if matches!(cell, Cell::Building { .. }) {
+            mesh_handles.house.clone()
+        } else {
+            mesh_handles.cube.clone()
+        };
     }
 }
 
 fn render_heat_grid_3d(
     grid: &Grid,
-    tile_query: &mut Query<(&Tile, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
+    tile_query: &mut Query<(
+        &Tile,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+        &mut Mesh3d,
+    )>,
     palette: &MaterialPalette,
+    mesh_handles: &MeshHandles,
 ) {
     let depth = build_depth_pressure(grid);
     let max = depth.iter().cloned().fold(1.0f32, f32::max);
 
-    for (tile, mut transform, mut mat) in tile_query.iter_mut() {
+    for (tile, mut transform, mut mat, mut mesh3d) in tile_query.iter_mut() {
         let idx = tile.y * grid.width + tile.x;
         let val = depth[idx];
         let handle = if val > 0.0 {
@@ -256,6 +377,11 @@ fn render_heat_grid_3d(
         transform.scale.y = scaled;
         transform.translation.y = scaled / 2.0;
         mat.0 = handle.clone();
+        mesh3d.0 = if matches!(grid.cells[idx], Cell::Building { .. }) {
+            mesh_handles.house.clone()
+        } else {
+            mesh_handles.cube.clone()
+        };
     }
 }
 
@@ -273,9 +399,23 @@ fn cell_surface_y(cell: &Cell) -> f32 {
     h * CUBE_HEIGHT
 }
 
-/// Casts a ray from the cursor and returns the grid cell of the first solid
-/// surface hit, scanning from the top of the scene downward (camera-near first).
-/// Falls back to the Y=0 ground plane if no solid surface is found.
+/// Slab method ray–AABB intersection. Returns the entry t (>= 0) or None.
+fn ray_hits_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let inv = Vec3::new(1.0 / dir.x, 1.0 / dir.y, 1.0 / dir.z);
+    let t1 = (min - origin) * inv;
+    let t2 = (max - origin) * inv;
+    let t_enter = t1.min(t2).max_element();
+    let t_exit = t1.max(t2).min_element();
+    if t_exit >= t_enter && t_exit >= 0.0 {
+        Some(t_enter.max(0.0))
+    } else {
+        None
+    }
+}
+
+/// Casts a ray from the cursor and returns the grid cell whose AABB is hit
+/// first (closest to the camera). Falls back to the Y=0 ground plane if no
+/// AABB is hit.
 pub fn find_cursor_cell(
     cursor_pos: Vec2,
     camera: &Camera,
@@ -288,54 +428,74 @@ pub fn find_cursor_cell(
     let ray = camera
         .viewport_to_world(camera_transform, cursor_pos)
         .ok()?;
-    let denom = ray.direction.y;
-    if denom.abs() < 1e-6 {
+    let dir = *ray.direction;
+    if dir.y.abs() < 1e-6 {
         return None;
     }
 
-    // Scan from max height (5.0) down to 0 in small steps.
-    // Each step moves ~0.1 world units in Y, ~0.05 world units in XZ.
-    // Scanning top-down ensures the frontmost (camera-nearest) surface is found first.
-    let steps = 50u32;
-    for step in 0..=steps {
-        let h = CUBE_HEIGHT * (1.0 - step as f32 / steps as f32);
-        let t = (h - ray.origin.y) / denom;
-        if t < 0.0 {
-            continue;
-        }
-        let hit = ray.origin + t * *ray.direction;
-        let gx_f = (hit.x + 0.5).floor();
-        let gz_f = (hit.z + 0.5).floor();
-        if gx_f < 0.0 || gz_f < 0.0 {
-            continue;
-        }
-        let gx = gx_f as usize;
-        let gz = gz_f as usize;
-        if gx >= grid.width || gz >= grid.height {
-            continue;
-        }
-        let cell = grid.get_cell(gx, gz);
-        if matches!(cell, Cell::Air) {
-            continue;
-        }
-        // Hit if the ray is at or just below this cell's top surface
-        if cell_surface_y(cell) >= h - (CUBE_HEIGHT / steps as f32) {
-            return Some((gx, gz));
+    // 1. Project ray to the Y=0 ground plane for candidate center.
+    let t_ground = -ray.origin.y / dir.y;
+    if t_ground < 0.0 {
+        return None;
+    }
+    let ground = ray.origin + t_ground * dir;
+    let gx0 = (ground.x + 0.5).floor() as i32;
+    let gz0 = (ground.z + 0.5).floor() as i32;
+
+    // 2. Compute per-axis search windows based on actual ray direction signs.
+    //    The ground projection undershoots in the direction opposite to the ray's XZ travel.
+    let shift_x = ((CUBE_HEIGHT / dir.y.abs()) * dir.x.abs()).ceil() as i32 + 1;
+    let shift_z = ((CUBE_HEIGHT / dir.y.abs()) * dir.z.abs()).ceil() as i32 + 1;
+    let (dx_lo, dx_hi) = if dir.x < 0.0 { (-1, shift_x) } else { (-shift_x, 1) };
+    let (dz_lo, dz_hi) = if dir.z < 0.0 { (-1, shift_z) } else { (-shift_z, 1) };
+
+    // 3. Ray-AABB test for each candidate cell; keep the closest hit.
+    let mut best_t = f32::MAX;
+    let mut best: Option<(usize, usize)> = None;
+    for dz in dz_lo..=dz_hi {
+        for dx in dx_lo..=dx_hi {
+            let gx = gx0 + dx;
+            let gz = gz0 + dz;
+            if gx < 0 || gz < 0 {
+                continue;
+            }
+            let gx = gx as usize;
+            let gz = gz as usize;
+            if gx >= grid.width || gz >= grid.height {
+                continue;
+            }
+
+            let cell = grid.get_cell(gx, gz);
+            // Skip Air cells — their short AABBs can occlude a tall neighbor's
+            // side face. Air cells are handled by the ground-plane fallback.
+            if matches!(cell, Cell::Air) {
+                continue;
+            }
+            let surface_y = cell_surface_y(cell);
+            let aabb_min = Vec3::new(gx as f32 - 0.5, 0.0, gz as f32 - 0.5);
+            let aabb_max = Vec3::new(gx as f32 + 0.5, surface_y, gz as f32 + 0.5);
+
+            if let Some(t) = ray_hits_aabb(ray.origin, dir, aabb_min, aabb_max) {
+                if t < best_t {
+                    best_t = t;
+                    best = Some((gx, gz));
+                }
+            }
         }
     }
 
-    // No solid surface — fall back to the Y=0 ground plane
-    let t = -ray.origin.y / denom;
-    if t < 0.0 {
-        return None;
-    }
-    let hit = ray.origin + t * *ray.direction;
-    let gx = (hit.x + 0.5).floor();
-    let gz = (hit.z + 0.5).floor();
-    if gx < 0.0 || gz < 0.0 {
-        return None;
-    }
-    Some((gx as usize, gz as usize))
+    // 4. Fallback to ground projection if no AABB was hit.
+    best.or_else(|| {
+        if gx0 >= 0
+            && gz0 >= 0
+            && (gx0 as usize) < grid.width
+            && (gz0 as usize) < grid.height
+        {
+            Some((gx0 as usize, gz0 as usize))
+        } else {
+            None
+        }
+    })
 }
 
 /// For a hypothetical block of `weight` at (x, y), returns the predicted
@@ -497,23 +657,12 @@ fn draw_hover_cursor(
     camera_q: Query<(&Camera, &GlobalTransform)>,
     grid: Res<Grid>,
     state: Res<GameState>,
-    tool: Res<SelectedTool>,
     mut gizmos: Gizmos,
 ) {
     let Ok(window) = windows.single() else { return };
     let Ok((camera, camera_transform)) = camera_q.single() else {
         return;
     };
-    // Height fraction matches what render_grid uses for each cell type
-    let h = match *tool {
-        SelectedTool::Block(_) => 0.8,
-        SelectedTool::Spring => 1.0,
-        SelectedTool::Drain => 0.3,
-        SelectedTool::Eraser => 0.15,
-        SelectedTool::Building { .. } => 1.0,
-    };
-    let scaled = h * CUBE_HEIGHT;
-
     let Some(cursor_pos) = window.cursor_position() else {
         return;
     };
@@ -530,9 +679,18 @@ fn draw_hover_cursor(
             let bx = (cx + dx).saturating_sub(r);
             let by = (cy + dy).saturating_sub(r);
             if bx < grid.width && by < grid.height {
-                let center = Vec3::new(bx as f32, scaled / 2.0, by as f32);
+                // Use the actual cell's rendered height so the box always fits the cell.
+                // For non-Air cells, raise the wireframe base to the air-tile
+                // surface (0.1 * CUBE_HEIGHT = 0.5) so it matches the visible
+                // extent — adjacent air tiles occlude the building base in the
+                // depth buffer, but gizmos render on top.
+                let cell = grid.get_cell(bx, by);
+                let top = cell_surface_y(cell);
+                let base = if matches!(cell, Cell::Air) { 0.0 } else { 0.1 * CUBE_HEIGHT };
+                let height = top - base;
+                let center = Vec3::new(bx as f32, base + height / 2.0, by as f32);
                 gizmos.cube(
-                    Transform::from_translation(center).with_scale(Vec3::new(1.0, scaled, 1.0)),
+                    Transform::from_translation(center).with_scale(Vec3::new(1.0, height, 1.0)),
                     color,
                 );
             }

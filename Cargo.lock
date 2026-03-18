@@ -7,6 +7,8 @@ name = "BlueRush"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_asset",
+ "bevy_mesh",
  "rand 0.8.5",
  "rfd",
  "serde",
