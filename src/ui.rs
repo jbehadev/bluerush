@@ -1,7 +1,7 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
-use crate::grid::{GameState, PANEL_WIDTH, SelectedTool, ViewMode};
+use crate::grid::{GameState, InletMode, PANEL_WIDTH, SelectedTool, ViewMode};
 use crate::simulation::{Cell, Grid};
 
 pub struct UiPlugin;
@@ -19,6 +19,8 @@ impl Plugin for UiPlugin {
                 update_tool_buttons,
                 handle_inlet_toggle,
                 update_inlet_button,
+                handle_inlet_mode_toggle,
+                update_inlet_mode_button,
                 handle_view_toggle,
                 update_view_buttons,
                 handle_reset,
@@ -49,6 +51,12 @@ struct BuildingButton;
 
 #[derive(Component)]
 pub struct InletButton;
+
+#[derive(Component)]
+struct InletLabel;
+
+#[derive(Component)]
+struct InletModeButton(InletMode);
 
 #[derive(Component)]
 struct ResetButton;
@@ -353,7 +361,7 @@ fn setup_ui(mut commands: Commands) {
                                 ));
                             });
                         btn.spawn((
-                            Text::new("Build"),
+                            Text::new("House"),
                             TextFont {
                                 font_size: 9.0,
                                 ..default()
@@ -476,14 +484,46 @@ fn setup_ui(mut commands: Commands) {
                 ))
                 .with_children(|btn| {
                     btn.spawn((
-                        Text::new("Inlet"),
+                        Text::new("Let it flow"),
                         TextFont {
                             font_size: 12.0,
                             ..default()
                         },
                         TextColor(Color::WHITE),
+                        InletLabel,
                     ));
                 });
+
+            // Inlet mode buttons (like VIEW section)
+            for (label, mode) in [
+                ("Flood", InletMode::Flood),
+                ("Sine", InletMode::Sine),
+                ("Random", InletMode::Random),
+            ] {
+                parent
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Px(104.0),
+                            height: Val::Px(28.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
+                        InletModeButton(mode),
+                    ))
+                    .with_children(|btn| {
+                        btn.spawn((
+                            Text::new(label),
+                            TextFont {
+                                font_size: 12.0,
+                                ..default()
+                            },
+                            TextColor(Color::WHITE),
+                        ));
+                    });
+            }
 
             // Divider
             parent.spawn((
@@ -722,7 +762,10 @@ fn handle_building_button(
 ) {
     for interaction in &q {
         if *interaction == Interaction::Pressed {
-            *selected = SelectedTool::Building { weight: 3000.0, threshold: 2500.0 };
+            *selected = SelectedTool::Building {
+                weight: 3000.0,
+                threshold: 2500.0,
+            };
         }
     }
 }
@@ -748,12 +791,13 @@ fn update_tool_buttons(
     >,
     mut spring_query: Query<
         &mut BackgroundColor,
-        (With<SpringButton>, Without<DrainButton>, Without<BuildingButton>),
+        (
+            With<SpringButton>,
+            Without<DrainButton>,
+            Without<BuildingButton>,
+        ),
     >,
-    mut drain_query: Query<
-        &mut BackgroundColor,
-        (With<DrainButton>, Without<BuildingButton>),
-    >,
+    mut drain_query: Query<&mut BackgroundColor, (With<DrainButton>, Without<BuildingButton>)>,
     mut building_query: Query<&mut BackgroundColor, With<BuildingButton>>,
     selected: Res<SelectedTool>,
 ) {
@@ -812,17 +856,52 @@ fn handle_inlet_toggle(
 }
 
 fn update_inlet_button(
-    mut query: Query<&mut BackgroundColor, With<InletButton>>,
+    mut btn_query: Query<&mut BackgroundColor, With<InletButton>>,
+    mut label_query: Query<&mut Text, With<InletLabel>>,
     state: Res<GameState>,
 ) {
     if !state.is_changed() {
         return;
     }
-    for mut color in &mut query {
+    for mut color in &mut btn_query {
         *color = if state.water_flow {
             BackgroundColor(Color::srgb(0.1, 0.6, 0.2))
         } else {
             BackgroundColor(Color::srgb(0.4, 0.15, 0.15))
+        };
+    }
+    for mut text in &mut label_query {
+        **text = if state.water_flow {
+            "Stop the flow".to_string()
+        } else {
+            "Let it flow".to_string()
+        };
+    }
+}
+
+fn handle_inlet_mode_toggle(
+    interaction_query: Query<(&Interaction, &InletModeButton), Changed<Interaction>>,
+    mut inlet_mode: ResMut<InletMode>,
+) {
+    for (interaction, btn) in &interaction_query {
+        if *interaction == Interaction::Pressed {
+            *inlet_mode = btn.0.clone();
+        }
+    }
+}
+
+fn update_inlet_mode_button(
+    mut query: Query<(&InletModeButton, &mut BackgroundColor)>,
+    inlet_mode: Res<InletMode>,
+) {
+    if !inlet_mode.is_changed() {
+        return;
+    }
+    for (btn, mut color) in &mut query {
+        *color = if btn.0 == *inlet_mode {
+            BackgroundColor(Color::srgb(0.2, 0.5, 0.8))
+        } else {
+            BackgroundColor(Color::srgb(0.30, 0.30, 0.34))
         };
     }
 }

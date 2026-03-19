@@ -67,6 +67,18 @@ pub struct GridConfig {
     pub collision_destruction: bool,
 }
 
+/// Controls how water enters from the inlet row (y=0).
+#[derive(Resource, PartialEq, Clone, Default)]
+pub enum InletMode {
+    /// Constant fill at MAX_WATER_KG every tick.
+    #[default]
+    Flood,
+    /// Smooth oscillation between 100 and MAX_WATER_KG using a sine wave.
+    Sine,
+    /// Random water level each frame between 100 and MAX_WATER_KG.
+    Random,
+}
+
 /// Controls which overlay is rendered on top of the grid.
 #[derive(Resource, PartialEq, Clone, Default)]
 pub enum ViewMode {
@@ -77,6 +89,21 @@ pub enum ViewMode {
     Pressure,
     /// Arrows showing predicted flow direction for the currently selected weight.
     FlowArrows,
+}
+
+/// Tracks per-cycle random peak for the Random inlet mode.
+#[derive(Resource)]
+pub struct WaveState {
+    /// Which sine cycle we're currently in (increments each zero-crossing).
+    pub cycle: u32,
+    /// Random peak for the current cycle (0.0–1.0 mapped to 100–MAX_WATER_KG).
+    pub peak: f32,
+}
+
+impl Default for WaveState {
+    fn default() -> Self {
+        Self { cycle: 0, peak: 1.0 }
+    }
 }
 
 /// Per-frame mutable simulation state, separate from `GridConfig` which is read-only.
@@ -125,6 +152,8 @@ fn setup(mut commands: Commands, config: Res<GridConfig>) {
         drag_start: None,
     });
     commands.init_resource::<ViewMode>();
+    commands.init_resource::<InletMode>();
+    commands.init_resource::<WaveState>();
     commands.insert_resource(SelectedTool::Block(200.0));
     commands.insert_resource(Grid::init(width, height));
 }
@@ -138,6 +167,7 @@ fn handle_input(
     mut state: ResMut<GameState>,
     mut selected: ResMut<SelectedTool>,
     mut view_mode: ResMut<ViewMode>,
+    mut inlet_mode: ResMut<InletMode>,
     mut save_events: MessageWriter<SaveRequested>,
     mut load_events: MessageWriter<LoadRequested>,
     mut undo_stack: ResMut<UndoStack>,
@@ -290,6 +320,13 @@ fn handle_input(
     if keyboard.just_pressed(KeyCode::KeyX) {
         state.water_flow = !state.water_flow;
     }
+    if keyboard.just_pressed(KeyCode::KeyW) {
+        *inlet_mode = match *inlet_mode {
+            InletMode::Flood => InletMode::Sine,
+            InletMode::Sine => InletMode::Random,
+            InletMode::Random => InletMode::Flood,
+        };
+    }
     if keyboard.just_pressed(KeyCode::KeyR) {
         *grid = Grid::init(grid.width, grid.height);
         state.water_flow = false;
@@ -342,16 +379,50 @@ fn animate_gate(mut grid: ResMut<Grid>, mut state: ResMut<GameState>) {
     }
 }
 
-fn flow_water(mut grid: ResMut<Grid>, state: Res<GameState>) {
+fn flow_water(
+    mut grid: ResMut<Grid>,
+    state: Res<GameState>,
+    inlet_mode: Res<InletMode>,
+    time: Res<Time>,
+    mut wave_state: ResMut<WaveState>,
+) {
     if !state.water_flow {
         return;
     }
-    let flow_rate: f32 = MAX_WATER_KG;
+    let period = 4.0_f32;
+    let t = time.elapsed_secs();
+    let flow_rate: f32 = match *inlet_mode {
+        InletMode::Flood => MAX_WATER_KG,
+        InletMode::Sine => {
+            100.0 + (MAX_WATER_KG - 100.0) * ((t * std::f32::consts::TAU / period).sin() * 0.5 + 0.5)
+        }
+        InletMode::Random => {
+            // Same sine shape, but pick a new random peak at each trough
+            use rand::Rng;
+            let phase = t * std::f32::consts::TAU / period;
+            let wave = phase.sin() * 0.5 + 0.5;
+            // Shift phase so the cycle counter increments at the trough (sin minimum)
+            let cycle_at_trough = ((phase + std::f32::consts::FRAC_PI_2) / std::f32::consts::TAU).floor() as u32;
+            if cycle_at_trough != wave_state.cycle {
+                wave_state.cycle = cycle_at_trough;
+                wave_state.peak = 0.1 + 0.9 * thread_rng().r#gen::<f32>();
+            }
+            100.0 + (MAX_WATER_KG - 100.0) * wave * wave_state.peak
+        }
+    };
     let width = grid.width;
+    let is_wave = *inlet_mode != InletMode::Flood;
     for x in 1..width - 1 {
         let new_cell = match grid.cells[x] {
             Cell::Air => Cell::Water(flow_rate),
-            Cell::Water(kg) => Cell::Water((kg + flow_rate).min(MAX_WATER_KG)),
+            Cell::Water(kg) => {
+                if is_wave {
+                    // In wave mode, force the inlet to the oscillating level
+                    Cell::Water(flow_rate)
+                } else {
+                    Cell::Water((kg + flow_rate).min(MAX_WATER_KG))
+                }
+            }
             Cell::Object(weight) => Cell::Object(weight),
             Cell::Wall => Cell::Wall,
             Cell::Spring => Cell::Spring,
