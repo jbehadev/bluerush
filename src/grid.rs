@@ -68,7 +68,7 @@ pub struct GridConfig {
 }
 
 /// Controls how water enters from the inlet row (y=0).
-#[derive(Resource, PartialEq, Clone, Default)]
+#[derive(Resource, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub enum InletMode {
     /// Constant fill at MAX_WATER_KG every tick.
     #[default]
@@ -140,7 +140,7 @@ struct PendingFileOp {
     op: Option<persistence::PendingIo>,
 }
 
-fn setup(mut commands: Commands, config: Res<GridConfig>) {
+pub fn setup(mut commands: Commands, config: Res<GridConfig>) {
     let width = config.cols;
     let height = config.rows;
 
