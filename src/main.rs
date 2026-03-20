@@ -15,6 +15,7 @@ mod simulation;
 mod textures;
 mod ui;
 mod undo;
+mod levels;
 
 fn main() {
     let config = AppConfig::load();
@@ -39,5 +40,6 @@ fn main() {
         }))
         .add_plugins(TexturesPlugin)
         .add_plugins(GridPlugin)
+        .add_plugins(crate::levels::LevelsPlugin)
         .run();
 }
