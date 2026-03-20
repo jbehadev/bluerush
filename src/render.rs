@@ -326,6 +326,8 @@ fn render_grid(
                 (0.8, &palette.objects[idx])
             }
             Cell::Building { .. } => (1.0, &palette.building),
+            Cell::Rock => (1.0, &palette.wall),
+            Cell::Sand => (0.1, &palette.air),
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
@@ -372,6 +374,8 @@ fn render_heat_grid_3d(
             Cell::Drain => 0.3,
             Cell::Object(_) => 0.8,
             Cell::Building { .. } => 1.0,
+            Cell::Rock => 1.0,
+            Cell::Sand => 0.1,
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
@@ -395,6 +399,8 @@ fn cell_surface_y(cell: &Cell) -> f32 {
         Cell::Drain => 0.3,
         Cell::Object(_) => 0.8,
         Cell::Building { .. } => 1.0,
+        Cell::Rock => 1.0,
+        Cell::Sand => 0.1,
     };
     h * CUBE_HEIGHT
 }
@@ -549,7 +555,18 @@ fn compute_arrow_info(
             };
             p_left.max(p_right).max(p_below)
         }
-        Cell::Wall | Cell::Building { .. } => return None,
+        Cell::Wall | Cell::Building { .. } | Cell::Rock => return None,
+        Cell::Sand => {
+            let p_below = if y > 0 {
+                match &grid.cells[(y - 1) * width + x] {
+                    Cell::Water(_) => depth[(y - 1) * width + x],
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            };
+            p_left.max(p_right).max(p_below)
+        }
     };
 
     let net_y = (raw_pressure - weight).max(0.0);

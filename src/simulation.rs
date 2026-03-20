@@ -22,6 +22,10 @@ pub enum Cell {
     Drain,
     /// A destructible building. Collapses into debris when depth pressure >= threshold.
     Building { weight: f32, threshold: f32 },
+    /// Natural terrain — impassable cliff or rock face. Identical to Wall in simulation.
+    Rock,
+    /// Natural terrain — passable beach or sea floor. Identical to Air in simulation.
+    Sand,
 }
 
 /// The simulation grid. Cells are stored in row-major order: index = `y * width + x`.
@@ -89,16 +93,17 @@ fn water_fill(cell: &Cell) -> Option<f32> {
     match cell {
         Cell::Water(f) => Some(*f),
         Cell::Spring => Some(MAX_WATER_KG),
-        Cell::Air | Cell::Object(_) | Cell::Wall | Cell::Drain | Cell::Building { .. } => None,
+        Cell::Air | Cell::Object(_) | Cell::Wall | Cell::Drain | Cell::Building { .. }
+            | Cell::Rock | Cell::Sand => None,
     }
 }
 
 fn flow_capacity(cell: &Cell) -> Option<f32> {
     match cell {
         Cell::Water(f) => Some(*f),
-        Cell::Air => Some(0.0),
+        Cell::Air | Cell::Sand => Some(0.0),
         Cell::Drain => Some(0.0), // drain appears empty — water always flows in
-        Cell::Object(_) | Cell::Wall | Cell::Spring | Cell::Building { .. } => None,
+        Cell::Object(_) | Cell::Wall | Cell::Spring | Cell::Building { .. } | Cell::Rock => None,
     }
 }
 
@@ -164,6 +169,8 @@ pub fn step_simulation(grid: &Grid) -> Vec<Cell> {
         match grid.cells[i] {
             Cell::Spring => new_cells[i] = Cell::Spring,
             Cell::Drain => new_cells[i] = Cell::Drain,
+            Cell::Rock => new_cells[i] = Cell::Rock,
+            Cell::Sand => new_cells[i] = Cell::Sand,
             _ => {}
         }
     }
@@ -233,11 +240,11 @@ pub fn build_depth_pressure(grid: &Grid) -> Vec<f32> {
                     depth[y * width + x] = pressure;
                     water_below.push((MAX_WATER_KG, y));
                 }
-                Cell::Wall => {
+                Cell::Wall | Cell::Rock => {
                     depth[y * width + x] = 0.0;
                     water_below.clear(); // walls block pressure from above
                 }
-                Cell::Air | Cell::Drain => {
+                Cell::Air | Cell::Drain | Cell::Sand => {
                     water_below.clear();
                     depth[y * width + x] = 0.0;
                 }
@@ -286,7 +293,7 @@ pub fn build_flow_distance(grid: &Grid) -> Vec<u32> {
                 continue;
             }
             match grid.cells[nidx] {
-                Cell::Wall | Cell::Building { .. } => {} // block flow path
+                Cell::Wall | Cell::Building { .. } | Cell::Rock => {} // block flow path
                 _ => {
                     dist[nidx] = d + 1;
                     queue.push_back(nidx);
@@ -502,7 +509,7 @@ pub fn step_objects(grid: &mut Grid, rng: &mut impl Rng, collision_destruction: 
         // we may mutate new_cells below for collision destruction.
         let effective_dst = {
             let is_blocked = |idx: usize| -> bool {
-                matches!(new_cells[idx], Cell::Wall | Cell::Spring | Cell::Drain | Cell::Building { .. })
+                matches!(new_cells[idx], Cell::Wall | Cell::Spring | Cell::Drain | Cell::Building { .. } | Cell::Rock)
                     || (matches!(new_cells[idx], Cell::Object(_)) && !moved_srcs.contains(&idx))
             };
             let primary_hits_object = matches!(new_cells[intent.dst], Cell::Object(_))
@@ -593,7 +600,7 @@ pub fn step_buildings(grid: &mut Grid) {
             }
             let nidx = ny as usize * width + nx as usize;
             match grid.cells[nidx] {
-                Cell::Wall | Cell::Spring | Cell::Drain | Cell::Building { .. } => continue,
+                Cell::Wall | Cell::Spring | Cell::Drain | Cell::Building { .. } | Cell::Rock => continue,
                 _ => {
                     grid.cells[nidx] = Cell::Object(weight / 3.0);
                     spawned += 1;
@@ -1071,5 +1078,35 @@ mod tests {
         assert_eq!(grid.width, 5);
         assert_eq!(grid.height, 4);
         assert!(grid.cells.iter().all(|c| matches!(c, Cell::Air)));
+    }
+
+    #[test]
+    fn test_rock_blocks_water_flow() {
+        // A 1x3 grid: Water at top, Rock in middle, Air at bottom.
+        // After one step, no water should reach the bottom cell.
+        let mut grid = Grid::blank(1, 3);
+        grid.set_cell(0, 0, Cell::Water(MAX_WATER_KG));
+        grid.set_cell(0, 1, Cell::Rock);
+        // y=2 stays Air
+        let result = step_simulation(&grid);
+        assert!(
+            matches!(result[2], Cell::Air),
+            "Rock should block water flow: got {:?}", result[2]
+        );
+    }
+
+    #[test]
+    fn test_sand_allows_water_flow() {
+        // A 1x3 grid: Water at top, Sand in middle, Air at bottom.
+        // After one step, water should be able to reach the Sand cell.
+        let mut grid = Grid::blank(1, 3);
+        grid.set_cell(0, 0, Cell::Water(MAX_WATER_KG));
+        grid.set_cell(0, 1, Cell::Sand);
+        // y=2 stays Air
+        let result = step_simulation(&grid);
+        assert!(
+            matches!(result[1], Cell::Water(_) | Cell::Sand),
+            "Sand should not block water flow"
+        );
     }
 }

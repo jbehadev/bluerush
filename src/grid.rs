@@ -428,6 +428,8 @@ fn flow_water(
             Cell::Spring => Cell::Spring,
             Cell::Drain => Cell::Drain,
             Cell::Building { weight, threshold } => Cell::Building { weight, threshold },
+            Cell::Rock => Cell::Rock,
+            Cell::Sand => Cell::Sand,
         };
         grid.set_cell(x, 0, new_cell);
     }
