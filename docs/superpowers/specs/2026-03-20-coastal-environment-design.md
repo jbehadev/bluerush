@@ -9,7 +9,7 @@ Transform the BlueRush game environment from a plain rectangular grid into a coa
 
 This covers three axes simultaneously:
 1. **Terrain shape** — Rock and Sand cell types form a physical bowl
-2. **Visual theming** — Warm Mediterranean colour palette with a sky background
+2. **Visual theming** — Warm Mediterranean colour palette with a sky background colour
 3. **Environmental storytelling** — The layout reads as a real place before a drop of water flows
 
 ## New Cell Types
@@ -17,18 +17,26 @@ This covers three axes simultaneously:
 Two new variants added to the `Cell` enum in `simulation.rs`:
 
 ### `Cell::Rock`
-- **Purpose:** Permanent, impassable terrain (cliffs, rim walls, outcrops)
-- **Simulation behaviour:** Identical to current `Object(9999)` border walls — water cannot enter, pressure physics ignore it, cannot be moved
-- **Visual:** Full-height mesh, stone grey-brown (`#7a6a5a`)
-- **Player interaction:** Cannot be placed or erased — level geometry only
+- **Purpose:** Permanent level-defined terrain (cliffs, rim walls, outcrops). Distinct from `Cell::Wall`, which represents man-made border walls and gate rows placed by `Grid::init`. Rock is natural terrain defined in level JSON files only.
+- **Simulation behaviour:** Impassable — identical to `Cell::Wall` in all simulation functions:
+  - `water_fill` → `None`
+  - `flow_capacity` → `None` (blocks flow)
+  - `build_depth_pressure` — clears depth accumulation (same path as `Cell::Wall`)
+  - `step_objects` — treated as an obstacle; objects cannot move into it
+- **Visual:** Full-height mesh (`transform.scale.y = 1.0`), stone grey-brown material (`#7a6a5a`)
+- **Player interaction:** Cannot be placed or erased — level geometry only. Not available in the toolbar.
 
 ### `Cell::Sand`
-- **Purpose:** Permanent, passable terrain (beach, sea floor, ground)
-- **Simulation behaviour:** Treated as `Air` — water flows through freely
-- **Visual:** Flat low-profile mesh (roughly 20% of full cell height), sandy tan (`#d4aa6a`)
-- **Player interaction:** Cannot be placed or erased — level geometry only
+- **Purpose:** Permanent, passable terrain (beach, sea floor, ground texture)
+- **Simulation behaviour:** Passable — identical to `Cell::Air` in all simulation functions:
+  - `water_fill` → `None` (no water stored)
+  - `flow_capacity` → `Some(0.0)` (water flows through freely, same as Air)
+  - `build_depth_pressure` — contributes 0.0 depth (same as Air)
+  - `step_objects` — objects can move into it (same as Air)
+- **Visual:** Flat low-profile mesh (`transform.scale.y = 0.2`), sandy tan material (`#d4aa6a`)
+- **Player interaction:** Cannot be placed or erased — level geometry only. Not available in the toolbar.
 
-Neither cell type is available as a toolbar tool. They exist only in level files.
+**Serialisation:** `Cell` already derives `Serialize, Deserialize`. Rock and Sand are added as unit variants; they round-trip correctly through player save/load. A saved game that contains Rock/Sand cells will restore that terrain on load — this is intentional and correct.
 
 ## Level File Format
 
@@ -37,7 +45,7 @@ Level layouts are defined in JSON files under `levels/` in the project root:
 ```
 levels/
   coastal-bowl.json
-  harbour-inlet.json    ← placeholder for future level
+  harbour-inlet.json    ← minimal valid stub, to be filled in a future session
 ```
 
 ### Schema
@@ -57,29 +65,39 @@ levels/
 ```
 
 - `cells` is a sparse list — only non-Air cells need to be listed
-- Cell values match the `Cell` enum variants: `"Rock"`, `"Sand"`, `"Air"`, `{ "Water": 0.0–1.0 }`, `{ "Object": weight_kg }`
-- `default_inlet_mode` sets the initial `WaterInletMode` when the level loads
+- Cell values match the `Cell` enum variants: `"Rock"`, `"Sand"`, `"Air"`, `{ "Water": f32 }`, `{ "Object": f32 }`, `"Wall"`
+- `default_inlet_mode` matches the `InletMode` enum variants: `"Flood"`, `"Sine"`, `"Random"`
+- `width` and `height` in the level file override `config.yaml` (`grid_cols`, `grid_rows`) — the level file is the source of truth for grid dimensions when a level is loaded
 
-### Coastal Bowl Layout
+### Grid Dimensions
 
-The `coastal-bowl.json` level defines:
+When a level loads, grid dimensions come from the level JSON, not `config.yaml`. A new `Grid::blank(width, height)` constructor is added that returns an all-`Cell::Air` grid with no hardcoded walls or reservoir. The level loader calls `Grid::blank()` and then applies the sparse cell list from the JSON on top. Tile entities in `render.rs` are spawned based on whichever dimensions are active at startup.
 
-- **Rock rim** — Rock cells along the entire left column, right column, and top row, with a single gap at the top-centre for the water inlet
+`Grid::init` (which adds hardcoded border walls and reservoir) is preserved as the fallback used when no level file is present or loading fails.
+
+### Coastal Bowl Layout (`coastal-bowl.json`)
+
+- **Rock rim** — Rock cells along the entire left column, right column, and top row, with a 4-cell gap at the top-centre for the water inlet
 - **Sand beach** — A 3-row band of Sand cells along the bottom, tapering up ~5 columns on the left side to suggest a shoreline
 - **Ocean inlet** — Bottom-left corner (~6×6 cells) pre-filled with `Water(1.0)` representing the open sea
-- **Rock outcrops** — 3–4 small clusters of Rock cells (2–4 cells each) scattered in the bowl interior to break up flat ground and redirect water
-- **Open centre** — Remaining interior cells are Air — the town area where the player places buildings
+- **Rock outcrops** — 3–4 small clusters of Rock cells (2–4 cells each) scattered in the bowl interior
+- **Open centre** — Remaining interior cells are `Air` — the town area where the player places buildings
+
+### Harbour Inlet Stub (`harbour-inlet.json`)
+
+A minimal valid file that loads without error. Defines the same dimensions as the bowl with all cells as Air and `"name": "Harbour Inlet"`. Layout to be authored in a future session.
 
 ## Level Loading (`src/levels.rs`)
 
 A new `LevelsPlugin` is responsible for:
 
-- Defining a `CurrentLevel` resource that holds the loaded `LevelData` struct
-- `load_level(path)` — reads a JSON file, deserialises it, writes cells into the `Grid` resource, sets inlet mode on `GameState`
-- `setup_level` system (Startup) — loads `levels/coastal-bowl.json` on app start
-- Reset button triggers a re-run of `load_level` with the current level path (replaces the existing blank-grid reset)
+- **`LevelData` struct** — deserialised representation of a level JSON file (`name`, `width`, `height`, `default_inlet_mode`, `cells`)
+- **`CurrentLevel` resource** — holds the path of the currently loaded level file
+- **`load_level(path, grid, state, inlet_mode)` function** — reads JSON, calls `Grid::blank()`, applies cells, sets `InletMode` from `default_inlet_mode`. On error (missing file, malformed JSON): logs the error and falls back to `Grid::init(width, height)` using config dimensions.
+- **`setup_level` system (Startup)** — loads `levels/coastal-bowl.json`
+- **`handle_reset` modification (`ui.rs`)** — replaces `*grid = Grid::init(...)` with a call to `load_level` using the path stored in `CurrentLevel`. Also clears `UndoStack` and resets `state.water_flow = false` and `state.gate_progress = 0` (preserving existing reset behaviour).
 
-This module is separate from `persistence.rs`, which handles player save/load. Save/load continues to serialise the full live cell state and is unaffected by level loading.
+This module is separate from `persistence.rs`, which handles player save/load and is unchanged.
 
 ## Visual Theming
 
@@ -87,8 +105,7 @@ This module is separate from `persistence.rs`, which handles player save/load. S
 
 | Element | Colour | Hex |
 |---------|--------|-----|
-| Sky (top) | Bright blue | `#5ba3d9` |
-| Sky (horizon) | Pale haze | `#d4ecf7` |
+| Sky background | Bright blue | `#5ba3d9` |
 | Rock | Stone grey-brown | `#7a6a5a` |
 | Sand | Warm tan | `#d4aa6a` |
 | Water (full) | Mediterranean blue | `#3a7fc1` |
@@ -96,16 +113,16 @@ This module is separate from `persistence.rs`, which handles player save/load. S
 
 ### Sky Background
 
-A single large flat `Plane` mesh placed behind the grid (negative Z, outside camera clip) with a `StandardMaterial` using a vertical gradient via a programmatic texture (top: `#5ba3d9`, bottom: `#d4ecf7`). Sized to fill the visible camera frustum. Created in `render.rs` alongside the existing tile setup.
+Set Bevy's `ClearColor` resource to `#5ba3d9` in `render.rs` setup. This fills the camera background with the sky colour at zero implementation cost and works correctly with the existing 3D orthographic isometric camera regardless of pan or zoom. A gradient sky is out of scope.
 
 ### Material Palette
 
-`Rock` and `Sand` materials are added to the existing `MaterialPalette` resource in `render.rs`. The `render_grid` system already switches materials per cell type — it just needs the two new handles added.
+`Rock` and `Sand` `StandardMaterial` handles are added to the existing `MaterialPalette` resource in `render.rs`. The `render_grid` system already switches materials per cell type — it needs two new match arms for `Cell::Rock` and `Cell::Sand`.
 
 ## Out of Scope
 
 - Player-placeable Sand or Rock tools
 - Erosion mechanics (Sand eroding under water pressure)
-- Animated sky or weather effects
+- Animated sky, weather effects, or sky gradient
 - Level select UI (future work — the JSON infrastructure enables it)
-- Harbour Inlet level content (file stub only)
+- Harbour Inlet level content (file is a minimal valid stub only)
