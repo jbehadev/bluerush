@@ -64,6 +64,16 @@ impl Grid {
         grid
     }
 
+    /// Create a new grid with all cells set to `Air` and no hardcoded geometry.
+    /// Use this as the base when loading a level from a JSON file.
+    pub fn blank(width: usize, height: usize) -> Grid {
+        Grid {
+            width,
+            height,
+            cells: vec![Cell::Air; width * height],
+        }
+    }
+
     /// Write a cell at grid coordinates `(x, y)`.
     pub fn set_cell(&mut self, x: usize, y: usize, cell: Cell) {
         self.cells[y * self.width + x] = cell;
@@ -1053,5 +1063,13 @@ mod tests {
             matches!(grid.cells[1 * 4 + 2], Cell::Air),
             "victim (200 kg) should also be destroyed when mover outweighs it"
         );
+    }
+
+    #[test]
+    fn test_grid_blank_is_all_air() {
+        let grid = Grid::blank(5, 4);
+        assert_eq!(grid.width, 5);
+        assert_eq!(grid.height, 4);
+        assert!(grid.cells.iter().all(|c| matches!(c, Cell::Air)));
     }
 }
