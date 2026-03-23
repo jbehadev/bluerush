@@ -185,11 +185,44 @@ src/
 | `draw_hover_cursor` | Yellow gizmo wireframe over hovered cells |
 | `draw_flow_arrows` | Gizmo arrows showing water flow direction (FlowArrows mode) |
 
+### Session 11 (Coastal Environment)
+- **`Cell::Rock` and `Cell::Sand`** — two new level-geometry cell types. Rock is impassable (like Wall), Sand is passable (like Air). Both are level-only — not player-placeable. Added to all exhaustive match arms across `simulation.rs`, `grid.rs`, `render.rs`.
+- **`Grid::blank(width, height)`** — new constructor returning an all-Air grid with no hardcoded walls or reservoir. Used by the level loader as the starting state before applying sparse cell placements.
+- **`serde` on `InletMode`** — added `Serialize, Deserialize` derives so inlet mode can round-trip through JSON level files.
+- **`src/levels.rs` module** — `LevelsPlugin`, `CurrentLevel` resource, `LevelData` / `CellPlacement` structs, `pub fn load_level`. Loads a JSON level file at startup; falls back to `Grid::init` on error. System ordered `.after(crate::grid::setup)`.
+- **JSON level format** — sparse cell placement format: `{ "name", "width", "height", "default_inlet_mode", "cells": [{"x","y","cell"}] }`. Cell values use serde enum serialisation.
+- **`levels/coastal-bowl.json`** — 60×33 grid: Rock rim on all 4 edges (4-cell inlet gap at top-centre x=28–31), Sand beach along the bottom 3 rows tapering on the left, Water ocean inlet in the bottom-left 6×6 corner, 3 Rock outcrops in the interior.
+- **`levels/harbour-inlet.json`** — minimal valid stub (all-Air, same dimensions) for future authoring.
+- **Reset reloads level** — both the Reset button (`handle_reset` in `ui.rs`) and `R` key shortcut (`handle_input` in `grid.rs`) now call `load_level` instead of `Grid::init`.
+- **Mediterranean visual theme** — Rock rendered in stone grey-brown (`#7a6a5a`), Sand in warm tan (`#d4aa6a`), sky background `ClearColor` set to Mediterranean blue (`#5ba3d9`).
+- **Placement guard** — `Cell::Rock` and `Cell::Sand` added to the placement guard in `grid.rs` so players cannot overwrite level terrain.
+- **17/17 unit tests pass** — 3 new tests: `test_grid_blank_is_all_air`, `test_rock_blocks_water_flow`, `test_sand_allows_water_flow`.
+
+## Current File Structure
+```
+src/
+  main.rs        — app setup, registers all plugins
+  grid.rs        — GridPlugin, all UI/rendering/input systems, 3D camera, gizmos
+  simulation.rs  — Cell/Grid types (inc. Rock/Sand), step_simulation, step_objects, build_depth_pressure, Grid::blank
+  textures.rs    — TexturesPlugin, TextureAssets resource, programmatic froth textures
+  persistence.rs — save/load grid to JSON files
+  levels.rs      — LevelsPlugin, CurrentLevel resource, load_level, LevelData/CellPlacement
+  render.rs      — RenderPlugin, MaterialPalette (inc. rock/sand), tile rendering, camera, gizmos
+levels/
+  coastal-bowl.json  — Coastal Bowl level (60×33, Rock rim, Sand beach, Water inlet)
+  harbour-inlet.json — Harbour Inlet stub (all-Air, 60×33)
+```
+
+## Where We Left Off
+
+Coastal environment fully implemented and on branch `feat/coastal-environment`. PR ready to merge.
+
 ---
 
 ## What Comes Next
+- **Harbour Inlet level** — author the level layout in `levels/harbour-inlet.json`
+- **Level select UI** — button/menu to switch between loaded level files
 - **Water rendering polish** — animated water surface, transparency, or wave effects
 - **Object interaction** — dragging placed objects, object-to-object collision
 - **Sound effects** — water flow, object placement, splash sounds
-- **Level system** — predefined challenges with win conditions
 - **Performance** — profile with large grids, consider chunk-based updates
