@@ -218,7 +218,7 @@ fn handle_input(
                         let by = (cy + dy).saturating_sub(r);
                         if bx < grid.width
                             && by < grid.height
-                            && !matches!(grid.get_cell(bx, by), Cell::Wall)
+                            && !matches!(grid.get_cell(bx, by), Cell::Wall | Cell::Rock | Cell::Sand)
                         {
                             let new_cell = match *selected {
                                 SelectedTool::Block(w)

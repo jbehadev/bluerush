@@ -47,6 +47,8 @@ pub struct MaterialPalette {
     pub spring: Handle<StandardMaterial>,
     pub drain: Handle<StandardMaterial>,
     pub building: Handle<StandardMaterial>,
+    pub rock: Handle<StandardMaterial>,
+    pub sand: Handle<StandardMaterial>,
     pub water: Vec<Handle<StandardMaterial>>,
     pub objects: Vec<Handle<StandardMaterial>>,
     pub heatmap: Vec<Handle<StandardMaterial>>,
@@ -160,6 +162,14 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
         cull_mode: None, // render both sides so the gable roof looks solid
         ..default()
     });
+    let rock = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.478, 0.416, 0.353), // #7a6a5a stone grey-brown
+        ..default()
+    });
+    let sand = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.831, 0.667, 0.416), // #d4aa6a warm tan
+        ..default()
+    });
 
     let water: Vec<_> = (0..WATER_PALETTE_SIZE)
         .map(|i| {
@@ -199,6 +209,8 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
         spring,
         drain,
         building,
+        rock,
+        sand,
         water,
         objects,
         heatmap,
@@ -233,6 +245,8 @@ fn setup_render(
     mut config_store: ResMut<GizmoConfigStore>,
     texture_assets: Res<TextureAssets>,
 ) {
+    commands.insert_resource(ClearColor(Color::srgb(0.357, 0.639, 0.851))); // #5ba3d9 sky blue
+
     let width = config.cols;
     let height = config.rows;
 
@@ -326,8 +340,8 @@ fn render_grid(
                 (0.8, &palette.objects[idx])
             }
             Cell::Building { .. } => (1.0, &palette.building),
-            Cell::Rock => (1.0, &palette.wall),
-            Cell::Sand => (0.1, &palette.air),
+            Cell::Rock => (1.0, &palette.rock),
+            Cell::Sand => (0.2, &palette.sand),
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
@@ -375,7 +389,7 @@ fn render_heat_grid_3d(
             Cell::Object(_) => 0.8,
             Cell::Building { .. } => 1.0,
             Cell::Rock => 1.0,
-            Cell::Sand => 0.1,
+            Cell::Sand => 0.2,
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
@@ -400,7 +414,7 @@ fn cell_surface_y(cell: &Cell) -> f32 {
         Cell::Object(_) => 0.8,
         Cell::Building { .. } => 1.0,
         Cell::Rock => 1.0,
-        Cell::Sand => 0.1,
+        Cell::Sand => 0.2,
     };
     h * CUBE_HEIGHT
 }
