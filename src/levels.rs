@@ -71,7 +71,7 @@ fn try_load_level(
     Ok(())
 }
 
-fn setup_level(
+pub fn setup_level(
     mut grid: ResMut<Grid>,
     mut state: ResMut<GameState>,
     mut inlet_mode: ResMut<InletMode>,

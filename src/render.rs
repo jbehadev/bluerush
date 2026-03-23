@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_asset::RenderAssetUsages;
 use bevy_mesh::{Indices, PrimitiveTopology};
 
-use crate::grid::{GameState, GridConfig, PANEL_WIDTH, SelectedTool, ViewMode};
+use crate::grid::{GameState, PANEL_WIDTH, SelectedTool, ViewMode};
 use crate::simulation::{Cell, Grid, MAX_WATER_KG, build_depth_pressure, build_flow_distance};
 use crate::textures::TextureAssets;
 
@@ -14,7 +14,9 @@ impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Startup,
-            setup_render.after(crate::textures::load_textures),
+            setup_render
+                .after(crate::textures::load_textures)
+                .after(crate::levels::setup_level),
         )
         .add_systems(Update, (render_grid, draw_hover_cursor, draw_flow_arrows));
     }
@@ -239,7 +241,7 @@ fn pressure_color(t: f32) -> Color {
 
 fn setup_render(
     mut commands: Commands,
-    config: Res<GridConfig>,
+    grid: Res<crate::simulation::Grid>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut config_store: ResMut<GizmoConfigStore>,
@@ -247,8 +249,8 @@ fn setup_render(
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.357, 0.639, 0.851))); // #5ba3d9 sky blue
 
-    let width = config.cols;
-    let height = config.rows;
+    let width = grid.width;
+    let height = grid.height;
 
     // Directional light (sun) for shadows and depth
     commands.spawn((
