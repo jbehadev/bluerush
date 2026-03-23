@@ -171,6 +171,8 @@ fn handle_input(
     mut save_events: MessageWriter<SaveRequested>,
     mut load_events: MessageWriter<LoadRequested>,
     mut undo_stack: ResMut<UndoStack>,
+    current_level: Res<crate::levels::CurrentLevel>,
+    config: Res<GridConfig>,
 ) {
     let Ok(window) = windows.single() else { return };
     let Ok((camera, camera_transform)) = camera_q.single() else {
@@ -328,9 +330,13 @@ fn handle_input(
         };
     }
     if keyboard.just_pressed(KeyCode::KeyR) {
-        *grid = Grid::init(grid.width, grid.height);
-        state.water_flow = false;
-        state.gate_progress = 0;
+        crate::levels::load_level(
+            &current_level.path,
+            &mut grid,
+            &mut state,
+            &mut inlet_mode,
+            &config,
+        );
         undo_stack.clear();
     }
     if keyboard.just_pressed(KeyCode::KeyM) {

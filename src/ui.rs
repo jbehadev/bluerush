@@ -1,7 +1,7 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
-use crate::grid::{GameState, InletMode, PANEL_WIDTH, SelectedTool, ViewMode};
+use crate::grid::{GameState, GridConfig, InletMode, PANEL_WIDTH, SelectedTool, ViewMode};
 use crate::simulation::{Cell, Grid};
 
 pub struct UiPlugin;
@@ -937,12 +937,21 @@ fn handle_reset(
     interaction_query: Query<&Interaction, (Changed<Interaction>, With<ResetButton>)>,
     mut grid: ResMut<Grid>,
     mut state: ResMut<GameState>,
+    mut inlet_mode: ResMut<InletMode>,
+    mut undo_stack: ResMut<crate::undo::UndoStack>,
+    config: Res<GridConfig>,
+    current_level: Res<crate::levels::CurrentLevel>,
 ) {
     for interaction in &interaction_query {
         if *interaction == Interaction::Pressed {
-            *grid = Grid::init(grid.width, grid.height);
-            state.water_flow = false;
-            state.gate_progress = 0;
+            crate::levels::load_level(
+                &current_level.path,
+                &mut grid,
+                &mut state,
+                &mut inlet_mode,
+                &config,
+            );
+            undo_stack.clear();
         }
     }
 }
