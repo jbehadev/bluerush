@@ -40,6 +40,8 @@ fn main() {
         }))
         .add_plugins(TexturesPlugin)
         .add_plugins(GridPlugin)
-        .add_plugins(crate::levels::LevelsPlugin)
+        .add_plugins(crate::levels::LevelsPlugin {
+            level_path: config.level.clone(),
+        })
         .run();
 }

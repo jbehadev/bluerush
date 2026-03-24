@@ -81,12 +81,14 @@ pub fn setup_level(
     load_level(&current_level.path, &mut grid, &mut state, &mut inlet_mode, &config);
 }
 
-pub struct LevelsPlugin;
+pub struct LevelsPlugin {
+    pub level_path: String,
+}
 
 impl Plugin for LevelsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(CurrentLevel {
-            path: PathBuf::from("levels/coastal-bowl.json"),
+            path: PathBuf::from(&self.level_path),
         })
         .add_systems(Startup, setup_level.after(crate::grid::setup));
     }
