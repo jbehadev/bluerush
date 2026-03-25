@@ -68,7 +68,7 @@ pub struct GridConfig {
 }
 
 /// Controls how water enters from the inlet row (y=0).
-#[derive(Resource, PartialEq, Clone, Default)]
+#[derive(Resource, PartialEq, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub enum InletMode {
     /// Constant fill at MAX_WATER_KG every tick.
     #[default]
@@ -140,7 +140,7 @@ struct PendingFileOp {
     op: Option<persistence::PendingIo>,
 }
 
-fn setup(mut commands: Commands, config: Res<GridConfig>) {
+pub fn setup(mut commands: Commands, config: Res<GridConfig>) {
     let width = config.cols;
     let height = config.rows;
 
@@ -171,6 +171,8 @@ fn handle_input(
     mut save_events: MessageWriter<SaveRequested>,
     mut load_events: MessageWriter<LoadRequested>,
     mut undo_stack: ResMut<UndoStack>,
+    current_level: Res<crate::levels::CurrentLevel>,
+    config: Res<GridConfig>,
 ) {
     let Ok(window) = windows.single() else { return };
     let Ok((camera, camera_transform)) = camera_q.single() else {
@@ -216,7 +218,7 @@ fn handle_input(
                         let by = (cy + dy).saturating_sub(r);
                         if bx < grid.width
                             && by < grid.height
-                            && !matches!(grid.get_cell(bx, by), Cell::Wall)
+                            && !matches!(grid.get_cell(bx, by), Cell::Wall | Cell::Rock | Cell::Sand)
                         {
                             let new_cell = match *selected {
                                 SelectedTool::Block(w)
@@ -328,9 +330,13 @@ fn handle_input(
         };
     }
     if keyboard.just_pressed(KeyCode::KeyR) {
-        *grid = Grid::init(grid.width, grid.height);
-        state.water_flow = false;
-        state.gate_progress = 0;
+        crate::levels::load_level(
+            &current_level.path,
+            &mut grid,
+            &mut state,
+            &mut inlet_mode,
+            &config,
+        );
         undo_stack.clear();
     }
     if keyboard.just_pressed(KeyCode::KeyM) {
@@ -428,6 +434,8 @@ fn flow_water(
             Cell::Spring => Cell::Spring,
             Cell::Drain => Cell::Drain,
             Cell::Building { weight, threshold } => Cell::Building { weight, threshold },
+            Cell::Rock => Cell::Rock,
+            Cell::Sand => Cell::Sand,
         };
         grid.set_cell(x, 0, new_cell);
     }

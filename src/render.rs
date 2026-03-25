@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_asset::RenderAssetUsages;
 use bevy_mesh::{Indices, PrimitiveTopology};
 
-use crate::grid::{GameState, GridConfig, PANEL_WIDTH, SelectedTool, ViewMode};
+use crate::grid::{GameState, PANEL_WIDTH, SelectedTool, ViewMode};
 use crate::simulation::{Cell, Grid, MAX_WATER_KG, build_depth_pressure, build_flow_distance};
 use crate::textures::TextureAssets;
 
@@ -14,7 +14,9 @@ impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Startup,
-            setup_render.after(crate::textures::load_textures),
+            setup_render
+                .after(crate::textures::load_textures)
+                .after(crate::levels::setup_level),
         )
         .add_systems(Update, (render_grid, draw_hover_cursor, draw_flow_arrows));
     }
@@ -47,6 +49,8 @@ pub struct MaterialPalette {
     pub spring: Handle<StandardMaterial>,
     pub drain: Handle<StandardMaterial>,
     pub building: Handle<StandardMaterial>,
+    pub rock: Handle<StandardMaterial>,
+    pub sand: Handle<StandardMaterial>,
     pub water: Vec<Handle<StandardMaterial>>,
     pub objects: Vec<Handle<StandardMaterial>>,
     pub heatmap: Vec<Handle<StandardMaterial>>,
@@ -160,6 +164,14 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
         cull_mode: None, // render both sides so the gable roof looks solid
         ..default()
     });
+    let rock = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.478, 0.416, 0.353), // #7a6a5a stone grey-brown
+        ..default()
+    });
+    let sand = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.831, 0.667, 0.416), // #d4aa6a warm tan
+        ..default()
+    });
 
     let water: Vec<_> = (0..WATER_PALETTE_SIZE)
         .map(|i| {
@@ -199,6 +211,8 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
         spring,
         drain,
         building,
+        rock,
+        sand,
         water,
         objects,
         heatmap,
@@ -227,14 +241,16 @@ fn pressure_color(t: f32) -> Color {
 
 fn setup_render(
     mut commands: Commands,
-    config: Res<GridConfig>,
+    grid: Res<crate::simulation::Grid>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut config_store: ResMut<GizmoConfigStore>,
     texture_assets: Res<TextureAssets>,
 ) {
-    let width = config.cols;
-    let height = config.rows;
+    commands.insert_resource(ClearColor(Color::srgb(0.357, 0.639, 0.851))); // #5ba3d9 sky blue
+
+    let width = grid.width;
+    let height = grid.height;
 
     // Directional light (sun) for shadows and depth
     commands.spawn((
@@ -326,6 +342,8 @@ fn render_grid(
                 (0.8, &palette.objects[idx])
             }
             Cell::Building { .. } => (1.0, &palette.building),
+            Cell::Rock => (1.0, &palette.rock),
+            Cell::Sand => (0.2, &palette.sand),
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
@@ -372,6 +390,8 @@ fn render_heat_grid_3d(
             Cell::Drain => 0.3,
             Cell::Object(_) => 0.8,
             Cell::Building { .. } => 1.0,
+            Cell::Rock => 1.0,
+            Cell::Sand => 0.2,
         };
         let scaled = h * CUBE_HEIGHT;
         transform.scale.y = scaled;
@@ -395,6 +415,8 @@ fn cell_surface_y(cell: &Cell) -> f32 {
         Cell::Drain => 0.3,
         Cell::Object(_) => 0.8,
         Cell::Building { .. } => 1.0,
+        Cell::Rock => 1.0,
+        Cell::Sand => 0.2,
     };
     h * CUBE_HEIGHT
 }
@@ -549,7 +571,18 @@ fn compute_arrow_info(
             };
             p_left.max(p_right).max(p_below)
         }
-        Cell::Wall | Cell::Building { .. } => return None,
+        Cell::Wall | Cell::Building { .. } | Cell::Rock => return None,
+        Cell::Sand => {
+            let p_below = if y > 0 {
+                match &grid.cells[(y - 1) * width + x] {
+                    Cell::Water(_) => depth[(y - 1) * width + x],
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            };
+            p_left.max(p_right).max(p_below)
+        }
     };
 
     let net_y = (raw_pressure - weight).max(0.0);
