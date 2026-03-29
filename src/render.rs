@@ -55,6 +55,10 @@ pub struct MaterialPalette {
     pub objects: Vec<Handle<StandardMaterial>>,
     pub heatmap: Vec<Handle<StandardMaterial>>,
     pub heatmap_zero: Handle<StandardMaterial>,
+    pub water_body: Handle<StandardMaterial>,
+    pub terrain_grass: Handle<StandardMaterial>,
+    pub terrain_hills: Handle<StandardMaterial>,
+    pub terrain_base: Handle<StandardMaterial>,
 }
 
 /// Mesh handles for cell types that need non-cuboid shapes.
@@ -205,6 +209,11 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
         .collect();
     let heatmap_zero = materials.add(Color::WHITE);
 
+    let water_body = materials.add(Color::srgb(0.15, 0.35, 0.65));
+    let terrain_grass = materials.add(Color::srgb(0.28, 0.45, 0.22));
+    let terrain_hills = materials.add(Color::srgb(0.20, 0.38, 0.16));
+    let terrain_base = materials.add(Color::srgb(0.40, 0.35, 0.28));
+
     MaterialPalette {
         air,
         wall,
@@ -217,6 +226,10 @@ fn build_palette(materials: &mut Assets<StandardMaterial>, froth: Handle<Image>)
         objects,
         heatmap,
         heatmap_zero,
+        water_body,
+        terrain_grass,
+        terrain_hills,
+        terrain_base,
     }
 }
 
@@ -291,6 +304,58 @@ fn setup_render(
             ));
         }
     }
+
+    // --- Environment decoration (no Tile component, ignored by render_grid) ---
+    let w = width as f32;
+    let h = height as f32;
+
+    // Water body (reservoir behind inlet row)
+    commands.spawn((
+        Mesh3d(cube_mesh.clone()),
+        MeshMaterial3d(palette.water_body.clone()),
+        Transform::from_xyz(w / 2.0, -0.05, -10.0)
+            .with_scale(Vec3::new(w + 20.0, 0.1, 20.0)),
+    ));
+
+    // Lower hills beyond bottom wall
+    commands.spawn((
+        Mesh3d(cube_mesh.clone()),
+        MeshMaterial3d(palette.terrain_grass.clone()),
+        Transform::from_xyz(w / 2.0, 1.5, h + 6.0)
+            .with_scale(Vec3::new(w + 20.0, 3.0, 12.0)),
+    ));
+
+    // Upper hills (further back, taller)
+    commands.spawn((
+        Mesh3d(cube_mesh.clone()),
+        MeshMaterial3d(palette.terrain_hills.clone()),
+        Transform::from_xyz(w / 2.0, 3.5, h + 14.0)
+            .with_scale(Vec3::new(w + 20.0, 7.0, 8.0)),
+    ));
+
+    // Left side terrain
+    commands.spawn((
+        Mesh3d(cube_mesh.clone()),
+        MeshMaterial3d(palette.terrain_grass.clone()),
+        Transform::from_xyz(-12.0, -0.1, h / 2.0)
+            .with_scale(Vec3::new(24.0, 0.2, h + 40.0)),
+    ));
+
+    // Right side terrain
+    commands.spawn((
+        Mesh3d(cube_mesh.clone()),
+        MeshMaterial3d(palette.terrain_grass.clone()),
+        Transform::from_xyz(w + 12.0, -0.1, h / 2.0)
+            .with_scale(Vec3::new(24.0, 0.2, h + 40.0)),
+    ));
+
+    // Ground plane (catch-all base)
+    commands.spawn((
+        Mesh3d(cube_mesh.clone()),
+        MeshMaterial3d(palette.terrain_base.clone()),
+        Transform::from_xyz(w / 2.0, -0.3, h / 2.0)
+            .with_scale(Vec3::new(w + 50.0, 0.1, h + 50.0)),
+    ));
 
     commands.insert_resource(palette);
     commands.insert_resource(MeshHandles {

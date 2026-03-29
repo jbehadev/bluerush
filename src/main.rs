@@ -21,6 +21,7 @@ fn main() {
     let config = AppConfig::load();
 
     App::new()
+        .insert_resource(ClearColor(Color::srgb(0.55, 0.65, 0.78)))
         .insert_resource(WinitSettings {
             focused_mode: UpdateMode::reactive(Duration::from_secs_f64(1.0 / 60.0)),
             unfocused_mode: UpdateMode::reactive(Duration::from_secs(1)),
