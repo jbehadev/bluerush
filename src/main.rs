@@ -29,6 +29,7 @@ fn main() {
         .insert_resource(GridConfig {
             cols: config.grid_cols,
             rows: config.grid_rows,
+            depth: config.grid_depth,
             tile_size: config.tile_size,
             collision_destruction: config.collision_destruction,
         })

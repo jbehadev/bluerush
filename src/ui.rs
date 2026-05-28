@@ -1,8 +1,9 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
-use crate::grid::{GameState, GridConfig, InletMode, PANEL_WIDTH, SelectedTool, ViewMode};
-use crate::simulation::{Cell, Grid};
+use crate::grid::{ActiveLayer, GameState, GridConfig, InletMode, PANEL_WIDTH, SelectedTool, ViewMode};
+use crate::simulation::Cell;
+use crate::simulation3d::Grid3D;
 
 pub struct UiPlugin;
 
@@ -28,6 +29,8 @@ impl Plugin for UiPlugin {
                 update_speed_label,
                 handle_brush_buttons,
                 update_brush_label,
+                handle_layer_buttons,
+                update_layer_label,
                 update_status,
             ),
         );
@@ -84,6 +87,15 @@ struct BrushUpButton;
 
 #[derive(Component)]
 struct BrushLabel;
+
+#[derive(Component)]
+struct LayerDownButton;
+
+#[derive(Component)]
+struct LayerUpButton;
+
+#[derive(Component)]
+struct LayerLabel;
 
 fn setup_ui(mut commands: Commands) {
     // Left toolbar — SimCity-style icon panel
@@ -446,6 +458,46 @@ fn setup_ui(mut commands: Commands) {
                         ));
                     });
                 });
+
+            // LAYER section
+            parent.spawn((
+                Text::new("LAYER"),
+                TextFont { font_size: 9.0, ..default() },
+                TextColor(Color::srgb(0.55, 0.55, 0.60)),
+            ));
+            parent.spawn((Node {
+                width: Val::Px(104.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::SpaceBetween,
+                ..default()
+            },))
+            .with_children(|row| {
+                row.spawn((
+                    Button,
+                    Node { width: Val::Px(30.0), height: Val::Px(28.0),
+                        align_items: AlignItems::Center, justify_content: JustifyContent::Center, ..default() },
+                    BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
+                    LayerDownButton,
+                )).with_children(|btn| {
+                    btn.spawn((Text::new("-"), TextFont { font_size: 16.0, ..default() }, TextColor(Color::WHITE)));
+                });
+                row.spawn((
+                    Text::new("L:1"),
+                    TextFont { font_size: 11.0, ..default() },
+                    TextColor(Color::WHITE),
+                    LayerLabel,
+                ));
+                row.spawn((
+                    Button,
+                    Node { width: Val::Px(30.0), height: Val::Px(28.0),
+                        align_items: AlignItems::Center, justify_content: JustifyContent::Center, ..default() },
+                    BackgroundColor(Color::srgb(0.30, 0.30, 0.34)),
+                    LayerUpButton,
+                )).with_children(|btn| {
+                    btn.spawn((Text::new("+"), TextFont { font_size: 16.0, ..default() }, TextColor(Color::WHITE)));
+                });
+            });
 
             // Divider
             parent.spawn((
@@ -935,12 +987,13 @@ fn update_view_buttons(
 
 fn handle_reset(
     interaction_query: Query<&Interaction, (Changed<Interaction>, With<ResetButton>)>,
-    mut grid: ResMut<Grid>,
+    mut grid: ResMut<Grid3D>,
     mut state: ResMut<GameState>,
     mut inlet_mode: ResMut<InletMode>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     config: Res<GridConfig>,
     current_level: Res<crate::levels::CurrentLevel>,
+    mut dirty: MessageWriter<crate::grid::GridDirty>,
 ) {
     for interaction in &interaction_query {
         if *interaction == Interaction::Pressed {
@@ -952,8 +1005,39 @@ fn handle_reset(
                 &config,
             );
             undo_stack.clear();
+            dirty.write(crate::grid::GridDirty);
         }
     }
+}
+
+fn handle_layer_buttons(
+    down_q: Query<&Interaction, (Changed<Interaction>, With<LayerDownButton>)>,
+    up_q:   Query<&Interaction, (Changed<Interaction>, With<LayerUpButton>)>,
+    mut active_layer: ResMut<ActiveLayer>,
+    grid: Res<Grid3D>,
+) {
+    for interaction in &down_q {
+        if *interaction == Interaction::Pressed && active_layer.y > 0 {
+            active_layer.y -= 1;
+        }
+    }
+    for interaction in &up_q {
+        if *interaction == Interaction::Pressed && active_layer.y + 1 < grid.height {
+            active_layer.y += 1;
+        }
+    }
+}
+
+fn update_layer_label(
+    active_layer: Res<ActiveLayer>,
+    grid: Res<Grid3D>,
+    mut label_q: Query<&mut Text, With<LayerLabel>>,
+) {
+    if !active_layer.is_changed() { return; }
+    for mut text in &mut label_q {
+        **text = format!("L:{}", active_layer.y);
+    }
+    let _ = grid.height; // suppress unused warning
 }
 
 fn handle_speed_buttons(
@@ -1012,7 +1096,7 @@ fn update_brush_label(mut label_query: Query<&mut Text, With<BrushLabel>>, state
 fn update_status(
     mut query: Query<&mut Text, With<StatusText>>,
     diagnostics: Res<DiagnosticsStore>,
-    grid: Res<Grid>,
+    grid: Res<Grid3D>,
     state: Res<GameState>,
 ) {
     let fps = diagnostics

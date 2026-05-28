@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub window_height: f32,
     pub grid_cols: usize,
     pub grid_rows: usize,
+    pub grid_depth: usize,
     pub tile_size: f32,
     pub collision_destruction: bool,
     pub level: String,
@@ -17,13 +18,14 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            window_width: 800.0,
-            window_height: 600.0,
-            grid_cols: 42,
-            grid_rows: 37,
+            window_width: 1200.0,
+            window_height: 800.0,
+            grid_cols: 40,
+            grid_rows: 20,
+            grid_depth: 40,
             tile_size: 16.0,
             collision_destruction: false,
-            level: "levels/coastal-bowl.json".to_string(),
+            level: "levels/valley-flood.json".to_string(),
         }
     }
 }

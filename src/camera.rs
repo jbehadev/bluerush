@@ -1,4 +1,3 @@
-use bevy::camera::ScalingMode;
 use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -48,19 +47,17 @@ impl CameraState {
 /// and insert a `CameraState` resource with default orbit angles.
 pub fn setup_camera(mut commands: Commands, config: Res<GridConfig>) {
     let width = config.cols;
-    let height = config.rows;
+    let depth = config.depth;
 
-    let vis_width = width as f32 + 4.0;
     let center_x = width as f32 / 2.0;
-    let center_z = height as f32 / 2.0;
-    let grid_extent = (width as f32 / 2.0).max(center_z);
+    let center_z = depth as f32 / 2.0;
+    let grid_extent = (width as f32).max(depth as f32) / 2.0;
 
     let focus = Vec3::new(center_x, 0.0, center_z);
 
-    // Initial orbit: 45° azimuth, ~50° elevation
     let yaw: f32 = PI / 4.0;
-    let pitch: f32 = 0.85; // ~49°
-    let distance = grid_extent * 1.7;
+    let pitch: f32 = 0.85;
+    let distance = grid_extent * 2.2;
 
     let cam_state = CameraState {
         focus,
@@ -75,11 +72,9 @@ pub fn setup_camera(mut commands: Commands, config: Res<GridConfig>) {
 
     commands.spawn((
         Camera3d::default(),
-        Projection::Orthographic(OrthographicProjection {
-            scaling_mode: ScalingMode::FixedHorizontal {
-                viewport_width: vis_width * 1.5,
-            },
-            ..OrthographicProjection::default_3d()
+        Projection::Perspective(PerspectiveProjection {
+            fov: std::f32::consts::FRAC_PI_4,
+            ..default()
         }),
         Transform::from_translation(cam_pos).looking_at(focus, Vec3::Y),
     ));
@@ -93,14 +88,12 @@ fn camera_controls(
     mut scroll_events: MessageReader<MouseWheel>,
     accumulated_motion: Res<AccumulatedMouseMotion>,
     windows: Query<&Window>,
-    mut camera_q: Query<(&mut Transform, &mut Projection)>,
+    mut camera_q: Query<&mut Transform, With<Camera3d>>,
     mut cam_state: ResMut<CameraState>,
     config: Res<GridConfig>,
 ) {
     let Ok(window) = windows.single() else { return };
-    let Ok((mut cam_transform, mut projection)) = camera_q.single_mut() else {
-        return;
-    };
+    let Ok(mut cam_transform) = camera_q.single_mut() else { return };
     let mut changed = false;
 
     let cursor_over_grid = window
@@ -112,15 +105,15 @@ fn camera_controls(
         || keyboard.pressed(KeyCode::SuperLeft)
         || keyboard.pressed(KeyCode::SuperRight);
 
-    // --- Zoom via scroll wheel ---
+    // --- Zoom via scroll wheel (changes orbit distance) ---
     for ev in scroll_events.read() {
         if cursor_over_grid {
             let scroll_amount = match ev.unit {
                 MouseScrollUnit::Line => ev.y * 0.15,
                 MouseScrollUnit::Pixel => ev.y * 0.002,
             };
-            cam_state.zoom *= 1.0 - scroll_amount;
-            cam_state.zoom = cam_state.zoom.clamp(0.2, 5.0);
+            cam_state.distance *= 1.0 - scroll_amount;
+            cam_state.distance = cam_state.distance.clamp(5.0, 300.0);
             changed = true;
         }
     }
@@ -133,22 +126,17 @@ fn camera_controls(
             let sensitivity = 0.005;
             cam_state.yaw -= motion.x * sensitivity;
             cam_state.pitch += motion.y * sensitivity;
-            // Clamp pitch: stay between ~5° and ~85° so the grid stays visible
             cam_state.pitch = cam_state.pitch.clamp(0.08, FRAC_PI_2 - 0.08);
             changed = true;
         } else if mouse.pressed(MouseButton::Right) {
             // --- Pan via right drag ---
-            let Projection::Orthographic(ref ortho) = *projection else {
-                return;
-            };
-            let pixels_to_world = (ortho.area.max.x - ortho.area.min.x) / window.width();
-
+            let pan_speed = cam_state.distance * 0.001;
             let right = cam_transform.right();
             let right_xz = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
             let forward = cam_transform.forward();
             let forward_xz = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
 
-            let pan = (-motion.x * right_xz + motion.y * forward_xz) * pixels_to_world;
+            let pan = (-motion.x * right_xz + motion.y * forward_xz) * pan_speed;
             cam_state.focus += pan;
             changed = true;
         }
@@ -157,19 +145,16 @@ fn camera_controls(
     // --- Reset on Home key ---
     if keyboard.just_pressed(KeyCode::Home) {
         let width = config.cols;
-        let height = config.rows;
-        cam_state.focus = Vec3::new(width as f32 / 2.0, 0.0, height as f32 / 2.0);
-        cam_state.yaw = cam_state.default_yaw;
+        let depth = config.depth;
+        cam_state.focus = Vec3::new(width as f32 / 2.0, 0.0, depth as f32 / 2.0);
+        cam_state.yaw   = cam_state.default_yaw;
         cam_state.pitch = cam_state.default_pitch;
-        cam_state.zoom = 1.0;
+        cam_state.zoom  = 1.0;
         changed = true;
     }
 
     // --- Apply camera state ---
     if changed {
-        if let Projection::Orthographic(ref mut ortho) = *projection {
-            ortho.scale = cam_state.zoom;
-        }
         let new_pos = cam_state.cam_pos();
         *cam_transform = Transform::from_translation(new_pos).looking_at(cam_state.focus, Vec3::Y);
     }
