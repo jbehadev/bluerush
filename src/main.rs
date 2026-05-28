@@ -12,6 +12,7 @@ mod grid;
 mod persistence;
 mod render;
 mod simulation;
+mod simulation3d;
 mod textures;
 mod ui;
 mod undo;

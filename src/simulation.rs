@@ -89,7 +89,7 @@ impl Grid {
     }
 }
 
-fn water_fill(cell: &Cell) -> Option<f32> {
+pub(crate) fn water_fill(cell: &Cell) -> Option<f32> {
     match cell {
         Cell::Water(f) => Some(*f),
         Cell::Spring => Some(MAX_WATER_KG),
@@ -98,7 +98,7 @@ fn water_fill(cell: &Cell) -> Option<f32> {
     }
 }
 
-fn flow_capacity(cell: &Cell) -> Option<f32> {
+pub(crate) fn flow_capacity(cell: &Cell) -> Option<f32> {
     match cell {
         Cell::Water(f) => Some(*f),
         Cell::Air | Cell::Sand => Some(0.0),
