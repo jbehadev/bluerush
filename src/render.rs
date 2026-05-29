@@ -76,14 +76,29 @@ fn is_transparent(cell: &Cell) -> bool {
 /// Only emits a face when the neighbour in that direction is transparent or
 /// out of bounds (world edge).
 fn build_voxel_mesh(grid: &Grid3D, cell_test: &impl Fn(&Cell) -> bool) -> Mesh {
-    // Each entry: (neighbour_offset, face_normal, 4 corner verts in unit-cube space)
+    // Each entry: (neighbour_offset, face_normal, 4 corner verts in unit-cube space).
+    // Vertex order is CCW when viewed from outside (i.e. from the direction of the normal),
+    // so Bevy's default back-face culling keeps interior faces hidden.
+    // Verified: cross(v1-v0, v2-v1) == normal for each face.
     const FACE_DATA: [([i32; 3], [f32; 3], [[f32; 3]; 4]); 6] = [
-        ([0,1,0],  [0.,1.,0.],  [[-0.5,0.5,-0.5],[0.5,0.5,-0.5],[0.5,0.5,0.5],[-0.5,0.5,0.5]]),
-        ([0,-1,0], [0.,-1.,0.], [[-0.5,-0.5,0.5],[0.5,-0.5,0.5],[0.5,-0.5,-0.5],[-0.5,-0.5,-0.5]]),
-        ([1,0,0],  [1.,0.,0.],  [[0.5,-0.5,-0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5]]),
-        ([-1,0,0], [-1.,0.,0.], [[-0.5,-0.5,0.5],[-0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[-0.5,0.5,0.5]]),
-        ([0,0,1],  [0.,0.,1.],  [[0.5,-0.5,0.5],[-0.5,-0.5,0.5],[-0.5,0.5,0.5],[0.5,0.5,0.5]]),
-        ([0,0,-1], [0.,0.,-1.], [[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,0.5,-0.5],[-0.5,0.5,-0.5]]),
+        // top (+Y): CCW from above → go +Z then +X
+        ([0,1,0],  [0.,1.,0.],
+         [[-0.5,0.5,-0.5],[-0.5,0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5]]),
+        // bottom (-Y): CCW from below → go +X then +Z
+        ([0,-1,0], [0.,-1.,0.],
+         [[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,-0.5,0.5],[-0.5,-0.5,0.5]]),
+        // right (+X): CCW from right → go +Y then +Z
+        ([1,0,0],  [1.,0.,0.],
+         [[0.5,-0.5,-0.5],[0.5,0.5,-0.5],[0.5,0.5,0.5],[0.5,-0.5,0.5]]),
+        // left (-X): CCW from left → go +Z then +Y
+        ([-1,0,0], [-1.,0.,0.],
+         [[-0.5,-0.5,-0.5],[-0.5,-0.5,0.5],[-0.5,0.5,0.5],[-0.5,0.5,-0.5]]),
+        // back (+Z): CCW from back → go +X then +Y
+        ([0,0,1],  [0.,0.,1.],
+         [[-0.5,-0.5,0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[-0.5,0.5,0.5]]),
+        // front (-Z): CCW from front → go +Y then +X
+        ([0,0,-1], [0.,0.,-1.],
+         [[-0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[0.5,0.5,-0.5],[0.5,-0.5,-0.5]]),
     ];
 
     let mut positions: Vec<[f32; 3]> = Vec::new();

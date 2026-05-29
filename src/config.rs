@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub window_height: f32,
     pub grid_cols: usize,
     pub grid_rows: usize,
+    #[serde(default = "default_grid_depth")]
     pub grid_depth: usize,
     pub tile_size: f32,
     pub collision_destruction: bool,
@@ -29,6 +30,8 @@ impl Default for AppConfig {
         }
     }
 }
+
+fn default_grid_depth() -> usize { 40 }
 
 const CONFIG_PATH: &str = "config.yaml";
 
