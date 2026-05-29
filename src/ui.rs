@@ -9,18 +9,20 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_ui).add_systems(
-            Update,
-            (
+        app.add_systems(Startup, setup_ui)
+            .add_systems(Update, (
                 handle_weight_buttons,
                 handle_eraser_button,
                 handle_spring_button,
                 handle_drain_button,
                 handle_building_button,
+                handle_wall_button,
                 update_tool_buttons,
                 handle_inlet_toggle,
                 update_inlet_button,
                 handle_inlet_mode_toggle,
+            ))
+            .add_systems(Update, (
                 update_inlet_mode_button,
                 handle_view_toggle,
                 update_view_buttons,
@@ -32,8 +34,7 @@ impl Plugin for UiPlugin {
                 handle_layer_buttons,
                 update_layer_label,
                 update_status,
-            ),
-        );
+            ));
     }
 }
 
@@ -51,6 +52,9 @@ struct DrainButton;
 
 #[derive(Component)]
 struct BuildingButton;
+
+#[derive(Component)]
+struct WallButton;
 
 #[derive(Component)]
 pub struct InletButton;
@@ -381,6 +385,42 @@ fn setup_ui(mut commands: Commands) {
                             TextColor(Color::WHITE),
                         ));
                     });
+                // Wall column-fill button
+                grid.spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(50.0),
+                        height: Val::Px(56.0),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::FlexEnd,
+                        padding: UiRect::bottom(Val::Px(4.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.55, 0.55, 0.58)),
+                    WallButton,
+                ))
+                .with_children(|btn| {
+                    btn.spawn((Node {
+                        width: Val::Px(50.0),
+                        height: Val::Px(38.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },))
+                    .with_children(|icon| {
+                        // Dark block icon representing a wall
+                        icon.spawn((
+                            Node { width: Val::Px(22.0), height: Val::Px(18.0), ..default() },
+                            BackgroundColor(Color::srgb(0.12, 0.12, 0.12)),
+                        ));
+                    });
+                    btn.spawn((
+                        Text::new("Wall"),
+                        TextFont { font_size: 9.0, ..default() },
+                        TextColor(Color::WHITE),
+                    ));
+                });
                 });
 
             // BRUSH section
@@ -814,10 +854,18 @@ fn handle_building_button(
 ) {
     for interaction in &q {
         if *interaction == Interaction::Pressed {
-            *selected = SelectedTool::Building {
-                weight: 3000.0,
-                threshold: 2500.0,
-            };
+            *selected = SelectedTool::Building { weight: 3000.0, threshold: 2500.0 };
+        }
+    }
+}
+
+fn handle_wall_button(
+    q: Query<&Interaction, (Changed<Interaction>, With<WallButton>)>,
+    mut selected: ResMut<SelectedTool>,
+) {
+    for interaction in &q {
+        if *interaction == Interaction::Pressed {
+            *selected = SelectedTool::Wall;
         }
     }
 }
@@ -825,32 +873,19 @@ fn handle_building_button(
 fn update_tool_buttons(
     mut weight_query: Query<
         (&WeightButton, &mut BackgroundColor),
-        (
-            Without<EraserButton>,
-            Without<SpringButton>,
-            Without<DrainButton>,
-            Without<BuildingButton>,
-        ),
+        (Without<EraserButton>, Without<SpringButton>, Without<DrainButton>, Without<BuildingButton>, Without<WallButton>),
     >,
     mut eraser_query: Query<
         &mut BackgroundColor,
-        (
-            With<EraserButton>,
-            Without<SpringButton>,
-            Without<DrainButton>,
-            Without<BuildingButton>,
-        ),
+        (With<EraserButton>, Without<SpringButton>, Without<DrainButton>, Without<BuildingButton>, Without<WallButton>),
     >,
     mut spring_query: Query<
         &mut BackgroundColor,
-        (
-            With<SpringButton>,
-            Without<DrainButton>,
-            Without<BuildingButton>,
-        ),
+        (With<SpringButton>, Without<DrainButton>, Without<BuildingButton>, Without<WallButton>),
     >,
-    mut drain_query: Query<&mut BackgroundColor, (With<DrainButton>, Without<BuildingButton>)>,
-    mut building_query: Query<&mut BackgroundColor, With<BuildingButton>>,
+    mut drain_query: Query<&mut BackgroundColor, (With<DrainButton>, Without<BuildingButton>, Without<WallButton>)>,
+    mut building_query: Query<&mut BackgroundColor, (With<BuildingButton>, Without<WallButton>)>,
+    mut wall_query: Query<&mut BackgroundColor, With<WallButton>>,
     selected: Res<SelectedTool>,
 ) {
     if !selected.is_changed() {
@@ -889,6 +924,13 @@ fn update_tool_buttons(
     }
     for mut color in &mut building_query {
         *color = if matches!(*selected, SelectedTool::Building { .. }) {
+            BackgroundColor(selected_color)
+        } else {
+            BackgroundColor(unselected_color)
+        };
+    }
+    for mut color in &mut wall_query {
+        *color = if *selected == SelectedTool::Wall {
             BackgroundColor(selected_color)
         } else {
             BackgroundColor(unselected_color)

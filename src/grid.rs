@@ -117,6 +117,9 @@ pub enum SelectedTool {
     Spring,
     Drain,
     Building { weight: f32, threshold: f32 },
+    /// Places Cell::Wall from Y=0 up to the active layer in a single click
+    /// (column-fill). Creates permanent, water-tight dams.
+    Wall,
 }
 
 #[derive(Resource, Default)]
@@ -224,7 +227,21 @@ fn handle_input(
                     for dx in 0..=(r * 2) {
                         let bx = (cx + dx).saturating_sub(r);
                         let bz = (cz + dz).saturating_sub(r);
-                        if bx < grid.width
+
+                        if *selected == SelectedTool::Wall {
+                            // Column-fill: place Wall from Y=0 to the top of the grid.
+                            // One click builds a full-height, water-tight dam column.
+                            for y in 0..grid.height {
+                                if bx < grid.width && bz < grid.depth
+                                    && !matches!(grid.get_cell(bx, y, bz), Cell::Rock | Cell::Sand | Cell::Wall)
+                                {
+                                    let old = grid.get_cell(bx, y, bz).clone();
+                                    undo_stack.record(bx, y, bz, old, Cell::Wall);
+                                    grid.set_cell(bx, y, bz, Cell::Wall);
+                                    placed = true;
+                                }
+                            }
+                        } else if bx < grid.width
                             && ay < grid.height
                             && bz < grid.depth
                             && !matches!(grid.get_cell(bx, ay, bz), Cell::Wall | Cell::Rock | Cell::Sand)
@@ -243,6 +260,7 @@ fn handle_input(
                                 SelectedTool::Building { weight, threshold }
                                     if !matches!(grid.get_cell(bx, ay, bz), Cell::Building { .. }) =>
                                     Some(Cell::Building { weight, threshold }),
+                                SelectedTool::Wall => unreachable!(),
                                 _ => None,
                             };
                             if let Some(new) = new_cell {

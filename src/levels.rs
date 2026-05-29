@@ -128,8 +128,8 @@ mod level_gen {
             }
         }
 
-        // Spring at (1, 1, 1) — water source in one corner
-        entries.push(r#"{"x":1,"y":1,"z":1,"cell":"Spring"}"#.to_string());
+        // Spring at (1, 2, 1) — water source in one corner, above the floor
+        entries.push(r#"{"x":1,"y":2,"z":1,"cell":"Spring"}"#.to_string());
 
         let json = format!(
             concat!(
