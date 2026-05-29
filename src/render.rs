@@ -3,7 +3,7 @@ use bevy_asset::RenderAssetUsages;
 use bevy_mesh::{Indices, PrimitiveTopology};
 
 use crate::grid::{ActiveLayer, GameState, GridDirty, PANEL_WIDTH};
-use crate::simulation::{Cell, MAX_WATER_KG};
+use crate::simulation::Cell;
 use crate::simulation3d::Grid3D;
 use crate::textures::TextureAssets;
 
@@ -386,4 +386,46 @@ pub fn find_cursor_cell_3d(
         return None;
     }
     Some((gx as usize, active_layer_y, gz as usize))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wall column filled from the floor up should render as a tall pillar,
+    /// not a single floating cube. This is the visual symptom the Wall tool
+    /// fixes: proves the data → mesh pipeline turns a filled column into a
+    /// many-faced pillar.
+    #[test]
+    fn filled_wall_column_renders_as_pillar() {
+        let mut g = Grid3D::blank(5, 20, 5);
+        for z in 0..5 { for x in 0..5 { g.set_cell(x, 0, z, Cell::Rock); } }
+        // 15-cell pillar standing on the Rock floor (Y=1..=15).
+        for y in 1..=15 { g.set_cell(2, y, 2, Cell::Wall); }
+
+        let mesh = build_voxel_mesh(&g, &|c: &Cell| matches!(c, Cell::Wall));
+        // 15 cells × 4 exposed sides = 60 faces, + 1 top face = 61 faces.
+        // (The bottom of Y=1 abuts Rock and the interior Y faces are culled.)
+        // 61 faces × 4 verts = 244. A single cube would be only 24 verts.
+        assert!(
+            mesh.count_vertices() >= 200,
+            "expected a tall pillar mesh, got {} verts",
+            mesh.count_vertices()
+        );
+    }
+
+    /// A lone wall voxel surrounded by air exposes all 6 faces (24 verts).
+    /// Guards against a regression where the column-fill silently places a
+    /// single cube at the active layer.
+    #[test]
+    fn single_wall_cube_renders_six_faces() {
+        let mut g = Grid3D::blank(5, 5, 5);
+        g.set_cell(2, 2, 2, Cell::Wall);
+        let mesh = build_voxel_mesh(&g, &|c: &Cell| matches!(c, Cell::Wall));
+        assert_eq!(mesh.count_vertices(), 24);
+    }
 }

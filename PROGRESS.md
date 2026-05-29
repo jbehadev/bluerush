@@ -262,6 +262,44 @@ levels/
 
 ---
 
+### Session 13 (Column-fill placement tools)
+
+- **Column-fill placement** — the Wall and Object tools now "drop" a column in a
+  single click: from the active layer straight down to the floor, instead of
+  placing a single cell that floats at the active layer.
+  - **Wall** → a solid `Cell::Wall` dam (water-tight).
+  - **Objects (200–5000 kg)** → a stack of `Cell::Object(w)` filling the empty
+    space so the blocks rest on the floor.
+  - **Spring / Drain / House / Erase** → unchanged (single cell at the active
+    layer), per the chosen design.
+- **`column_changes` pure function** (`simulation3d.rs`) — generic column-fill:
+  `(grid, x, z, active_layer_y, can_fill) -> Vec<(x, y, z, old_cell)>`. Fills
+  every cell from Y=0 up to the active layer (clamped to the ceiling) for which
+  the `can_fill` closure returns true. The caller decides what to fill with, so
+  one routine drives both the Wall dam and the Object stack.
+- **`wall_column_changes`** — thin wrapper: fills all cells except permanent
+  terrain (Rock / Sand) and existing Wall.
+- **Object fill predicate** — `|c| matches!(c, Cell::Air)` so a block stack only
+  fills empty space and never overwrites terrain or fixtures.
+- **`handle_input` restructure** — placement is now a `match *selected` with
+  dedicated column-fill arms for Wall and Block, plus a single-cell `_` arm for
+  the remaining tools.
+- **Toolchain gotcha** — `~/.cargo/bin` holds an x86_64 `rustc`/`rustup` that
+  can't run on this arm64 Mac (no Rosetta), so `cargo build` fails with
+  "Bad CPU type in executable". The working toolchain is homebrew's arm64
+  `/opt/homebrew/bin`. This had caused a stale-binary that masked earlier fixes.
+- **Rendering note** — all objects share one mid-grey material; they look black
+  when shaded (shadows are enabled) and grey when lit — not a separate material.
+- **33/33 unit tests pass** — added: 4 wall column-fill tests, 2 object
+  column-fill tests, and 2 render-pipeline tests proving a filled column builds a
+  tall pillar mesh (244 verts) vs a lone cube (24 verts).
+
+## Where We Left Off (current)
+
+Column-fill placement for Wall + Objects done on `feat/3d-simulation`.
+
+---
+
 ## What Comes Next
 - **Test and tune** — run `cargo run`, verify water flows from spring and pools, objects float
 - **Water depth shading** — per-fill-level water color (currently uses single mid-gradient material)

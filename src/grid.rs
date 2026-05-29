@@ -117,8 +117,9 @@ pub enum SelectedTool {
     Spring,
     Drain,
     Building { weight: f32, threshold: f32 },
-    /// Places Cell::Wall from Y=0 up to the active layer in a single click
-    /// (column-fill). Creates permanent, water-tight dams.
+    /// Column-fill tool: a single click drops a Cell::Wall column from the
+    /// active layer straight down to the floor, building a water-tight dam up
+    /// to the height you clicked.
     Wall,
 }
 
@@ -228,46 +229,59 @@ fn handle_input(
                         let bx = (cx + dx).saturating_sub(r);
                         let bz = (cz + dz).saturating_sub(r);
 
-                        if *selected == SelectedTool::Wall {
-                            // Column-fill: place Wall from Y=0 to the top of the grid.
-                            // One click builds a full-height, water-tight dam column.
-                            for y in 0..grid.height {
-                                if bx < grid.width && bz < grid.depth
-                                    && !matches!(grid.get_cell(bx, y, bz), Cell::Rock | Cell::Sand | Cell::Wall)
+                        match *selected {
+                            // Wall: a solid dam column dropped from the active
+                            // layer down to the floor. Fills everything except
+                            // permanent terrain (Rock / Sand) and existing Wall.
+                            SelectedTool::Wall => {
+                                for (wx, wy, wz, old) in
+                                    crate::simulation3d::wall_column_changes(&grid, bx, bz, ay)
                                 {
-                                    let old = grid.get_cell(bx, y, bz).clone();
-                                    undo_stack.record(bx, y, bz, old, Cell::Wall);
-                                    grid.set_cell(bx, y, bz, Cell::Wall);
+                                    undo_stack.record(wx, wy, wz, old, Cell::Wall);
+                                    grid.set_cell(wx, wy, wz, Cell::Wall);
                                     placed = true;
                                 }
                             }
-                        } else if bx < grid.width
-                            && ay < grid.height
-                            && bz < grid.depth
-                            && !matches!(grid.get_cell(bx, ay, bz), Cell::Wall | Cell::Rock | Cell::Sand)
-                        {
-                            let new_cell = match *selected {
-                                SelectedTool::Block(w)
-                                    if !matches!(grid.get_cell(bx, ay, bz), Cell::Object(_)) =>
-                                    Some(Cell::Object(w)),
-                                SelectedTool::Eraser => Some(Cell::Air),
-                                SelectedTool::Spring
-                                    if !matches!(grid.get_cell(bx, ay, bz), Cell::Spring) =>
-                                    Some(Cell::Spring),
-                                SelectedTool::Drain
-                                    if !matches!(grid.get_cell(bx, ay, bz), Cell::Drain) =>
-                                    Some(Cell::Drain),
-                                SelectedTool::Building { weight, threshold }
-                                    if !matches!(grid.get_cell(bx, ay, bz), Cell::Building { .. }) =>
-                                    Some(Cell::Building { weight, threshold }),
-                                SelectedTool::Wall => unreachable!(),
-                                _ => None,
-                            };
-                            if let Some(new) = new_cell {
-                                let old = grid.get_cell(bx, ay, bz).clone();
-                                undo_stack.record(bx, ay, bz, old, new.clone());
-                                grid.set_cell(bx, ay, bz, new);
-                                placed = true;
+                            // Objects: a stack dropped down the column, filling
+                            // the empty (Air) space so the blocks rest on the
+                            // floor instead of floating at the active layer.
+                            SelectedTool::Block(w) => {
+                                for (ox, oy, oz, old) in crate::simulation3d::column_changes(
+                                    &grid, bx, bz, ay, |c| matches!(c, Cell::Air),
+                                ) {
+                                    undo_stack.record(ox, oy, oz, old, Cell::Object(w));
+                                    grid.set_cell(ox, oy, oz, Cell::Object(w));
+                                    placed = true;
+                                }
+                            }
+                            // Single-cell tools act on the hovered cell at the
+                            // active layer.
+                            _ => {
+                                if bx < grid.width
+                                    && ay < grid.height
+                                    && bz < grid.depth
+                                    && !matches!(grid.get_cell(bx, ay, bz), Cell::Wall | Cell::Rock | Cell::Sand)
+                                {
+                                    let new_cell = match *selected {
+                                        SelectedTool::Eraser => Some(Cell::Air),
+                                        SelectedTool::Spring
+                                            if !matches!(grid.get_cell(bx, ay, bz), Cell::Spring) =>
+                                            Some(Cell::Spring),
+                                        SelectedTool::Drain
+                                            if !matches!(grid.get_cell(bx, ay, bz), Cell::Drain) =>
+                                            Some(Cell::Drain),
+                                        SelectedTool::Building { weight, threshold }
+                                            if !matches!(grid.get_cell(bx, ay, bz), Cell::Building { .. }) =>
+                                            Some(Cell::Building { weight, threshold }),
+                                        _ => None,
+                                    };
+                                    if let Some(new) = new_cell {
+                                        let old = grid.get_cell(bx, ay, bz).clone();
+                                        undo_stack.record(bx, ay, bz, old, new.clone());
+                                        grid.set_cell(bx, ay, bz, new);
+                                        placed = true;
+                                    }
+                                }
                             }
                         }
                     }

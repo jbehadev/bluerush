@@ -300,6 +300,55 @@ pub fn step_objects_3d(grid: &mut Grid3D, rng: &mut impl Rng, collision_destruct
 }
 
 // ---------------------------------------------------------------------------
+// Column-fill tools
+// ---------------------------------------------------------------------------
+
+/// Compute the cells a column-fill click at column (x, z) should change. The
+/// fill "drops" from the active layer straight down to the floor: every cell
+/// from Y=0 up to `active_layer_y` (inclusive) for which `can_fill` returns
+/// true is included. Cells above the active layer are left untouched.
+///
+/// The caller supplies `can_fill` (which existing cells may be replaced) and
+/// decides what to fill them with — so the same routine builds a solid Wall
+/// dam or a stack of Objects. Returns `(x, y, z, old_cell)` for each changed
+/// cell so the caller can record undo history before applying.
+pub fn column_changes(
+    grid: &Grid3D,
+    x: usize,
+    z: usize,
+    active_layer_y: usize,
+    can_fill: impl Fn(&Cell) -> bool,
+) -> Vec<(usize, usize, usize, Cell)> {
+    let mut changes = Vec::new();
+    if x >= grid.width || z >= grid.depth {
+        return changes;
+    }
+    // Clamp the top of the fill to the active layer (and to the grid ceiling).
+    let top = active_layer_y.min(grid.height.saturating_sub(1));
+    for y in 0..=top {
+        let old = grid.get_cell(x, y, z);
+        if can_fill(old) {
+            changes.push((x, y, z, old.clone()));
+        }
+    }
+    changes
+}
+
+/// Wall column-fill: fills every cell from the active layer down to the floor
+/// that is not permanent terrain (Rock / Sand) or an existing Wall, building
+/// a water-tight dam.
+pub fn wall_column_changes(
+    grid: &Grid3D,
+    x: usize,
+    z: usize,
+    active_layer_y: usize,
+) -> Vec<(usize, usize, usize, Cell)> {
+    column_changes(grid, x, z, active_layer_y, |c| {
+        !matches!(c, Cell::Rock | Cell::Sand | Cell::Wall)
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -323,6 +372,76 @@ mod tests {
         let (x, y, z) = (3, 5, 7);
         let i = g.idx(x, y, z);
         assert_eq!(i, y * g.width * g.depth + z * g.width + x);
+    }
+
+    // Wall column-fill tool
+    #[test]
+    fn wall_column_drops_from_layer_to_floor() {
+        let mut g = Grid3D::blank(5, 20, 5);
+        // Rock floor at Y=0
+        for z in 0..5 { for x in 0..5 { g.set_cell(x, 0, z, Cell::Rock); } }
+
+        // Click the Wall tool at active layer 15.
+        let changes = wall_column_changes(&g, 2, 2, 15);
+
+        // Fills Y=1..=15 (15 cells); the Rock floor at Y=0 is skipped.
+        assert_eq!(changes.len(), 15);
+        assert!(changes.iter().all(|&(x, y, z, _)| x == 2 && z == 2 && (1..=15).contains(&y)));
+
+        for &(x, y, z, _) in &changes { g.set_cell(x, y, z, Cell::Wall); }
+        assert!(matches!(g.get_cell(2, 0, 2), Cell::Rock), "floor stays Rock");
+        for y in 1..=15 { assert!(matches!(g.get_cell(2, y, 2), Cell::Wall), "y={y} should be Wall"); }
+        for y in 16..20 { assert!(matches!(g.get_cell(2, y, 2), Cell::Air), "above the layer stays Air"); }
+    }
+
+    #[test]
+    fn wall_column_skips_existing_solid_cells() {
+        let mut g = Grid3D::blank(3, 10, 3);
+        g.set_cell(1, 0, 1, Cell::Rock);   // floor
+        g.set_cell(1, 2, 1, Cell::Wall);   // an existing wall partway up
+        let changes = wall_column_changes(&g, 1, 1, 4);
+        // Y=0 Rock and Y=2 Wall are skipped → only Y=1, 3, 4 change.
+        let ys: Vec<usize> = changes.iter().map(|&(_, y, _, _)| y).collect();
+        assert_eq!(ys, vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn wall_column_clamps_layer_to_grid_ceiling() {
+        let g = Grid3D::blank(3, 5, 3);
+        // An active layer beyond the grid height clamps to the top (Y=4).
+        let changes = wall_column_changes(&g, 1, 1, 99);
+        assert_eq!(changes.len(), 5); // Y=0..=4, all Air
+    }
+
+    #[test]
+    fn wall_column_out_of_bounds_is_empty() {
+        let g = Grid3D::blank(3, 5, 3);
+        assert!(wall_column_changes(&g, 5, 1, 2).is_empty());
+        assert!(wall_column_changes(&g, 1, 9, 2).is_empty());
+    }
+
+    // Object column-fill: stacks blocks down the empty column, leaving
+    // terrain and fixtures (Rock / Spring / etc.) intact.
+    #[test]
+    fn object_column_fills_only_air_cells() {
+        let mut g = Grid3D::blank(3, 10, 3);
+        g.set_cell(1, 0, 1, Cell::Rock);    // floor
+        g.set_cell(1, 3, 1, Cell::Spring);  // a fixture partway up the column
+        let changes = column_changes(&g, 1, 1, 5, |c| matches!(c, Cell::Air));
+        // Only the Air cells (Y=1, 2, 4, 5) fill; the Rock floor and the
+        // Spring are left untouched.
+        let ys: Vec<usize> = changes.iter().map(|&(_, y, _, _)| y).collect();
+        assert_eq!(ys, vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn object_column_stacks_from_floor_to_layer() {
+        let mut g = Grid3D::blank(4, 20, 4);
+        for z in 0..4 { for x in 0..4 { g.set_cell(x, 0, z, Cell::Rock); } }
+        let changes = column_changes(&g, 2, 2, 12, |c| matches!(c, Cell::Air));
+        // Y=1..=12 are Air → 12 cells fill; the Rock floor (Y=0) is skipped.
+        assert_eq!(changes.len(), 12);
+        assert!(changes.iter().all(|&(_, y, _, _)| (1..=12).contains(&y)));
     }
 
     // Task 2 — step_simulation_3d
