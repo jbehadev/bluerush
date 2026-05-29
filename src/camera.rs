@@ -53,11 +53,12 @@ pub fn setup_camera(mut commands: Commands, config: Res<GridConfig>) {
     let center_z = depth as f32 / 2.0;
     let grid_extent = (width as f32).max(depth as f32) / 2.0;
 
-    let focus = Vec3::new(center_x, 0.0, center_z);
+    // Focus at mid-height so we look into the bowl, not along its rim
+    let focus = Vec3::new(center_x, 5.0, center_z);
 
     let yaw: f32 = PI / 4.0;
-    let pitch: f32 = 0.85;
-    let distance = grid_extent * 2.2;
+    let pitch: f32 = 1.05; // ~60° — steep enough to see the floor
+    let distance = grid_extent * 3.5; // back up to see the full valley
 
     let cam_state = CameraState {
         focus,
@@ -146,7 +147,7 @@ fn camera_controls(
     if keyboard.just_pressed(KeyCode::Home) {
         let width = config.cols;
         let depth = config.depth;
-        cam_state.focus = Vec3::new(width as f32 / 2.0, 0.0, depth as f32 / 2.0);
+        cam_state.focus = Vec3::new(width as f32 / 2.0, 5.0, depth as f32 / 2.0);
         cam_state.yaw   = cam_state.default_yaw;
         cam_state.pitch = cam_state.default_pitch;
         cam_state.zoom  = 1.0;
