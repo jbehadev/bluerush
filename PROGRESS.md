@@ -283,15 +283,59 @@ Parked as a reference — not the direction.
 - Emergent result the user liked: the heavy block dams the channel, water splits around it,
   and the diverted current carries the lighter blocks past.
 
+### Session 17 (Integration into the main app + controls)
+
+- **Promoted the prototype to the real app.** `src/bin/flood_demo.rs` → `src/flood.rs` as a
+  `FloodPlugin`; `main.rs` is now slim (load config, window + 60fps, `add_plugins(FloodPlugin)`).
+  `cargo run` (the BlueRush binary) launches the heightfield flood game.
+- **Retired the old 2D-voxel code** (the abandoned direction): deleted `simulation.rs`,
+  `render.rs`, `grid.rs`, `ui.rs`, `levels.rs`, `persistence.rs`, `undo.rs`, and the demo bins.
+  `camera.rs` / `textures.rs` left on disk, unreferenced (not in the module tree, so not
+  compiled). Kept a single-file `flood.rs` to avoid cross-module privacy churn (per the
+  integration-plan workflow's skeptic).
+- **UI panel** (`setup_ui` + handlers): OBJECTS weight buttons (200–5000 kg), a **Pour Water**
+  tool, and **WAVE** patterns — **Flood** (steady), **Sine** (pulsing), **Random** (gusty) —
+  modulating the source via `run_source`. Left-click applies the selected tool; clicks over
+  the panel are guarded by `cursor.x < PANEL_WIDTH`.
+- **Weight-scaled blocks** — `obj_footprint` / `obj_height` scale a block's size with weight
+  (sqrt-spaced); the unit cube mesh is scaled per object. Dam height + obstacle footprint are
+  tied to the block's size, so heavy blocks are big, tall, and dam more; collision spacing
+  scales too.
+- **Orbit camera** (`OrbitCamera` + `camera_controls`) — right-drag orbit, middle-drag pan,
+  scroll zoom (gentle, clamped), via `AccumulatedMouseMotion` / `AccumulatedMouseScroll`.
+- **Placement indicator** (`draw_placement_cursor`) — a gizmo wireframe box at the cursor
+  sized to the selected weight (flat square for Pour) showing where/how big the next drop lands.
+- **Pause** (`Paused` + `toggle_pause` / Pause button) — Space or the top button freezes the
+  water + object sim (the five sim systems early-return) while camera, placement, and rendering
+  keep running.
+- **Tried + reverted for overtopping:** foam-by-flow-speed (washed out) and rendering the water
+  surface up the obstacle floor (tented over blocks). Both looked bad; reverted to the clean
+  flat surface. Proper overtopping cresting needs a **weir-model** rework (see What Comes Next).
+- Note: deleting `simulation.rs` removed the old 2D unit tests; the flood game has no unit
+  tests yet (pure-function extraction + tests is a future cleanup).
+
+## Current File Structure (heightfield game)
+```
+src/
+  main.rs    — window/config + add_plugins(FloodPlugin)
+  flood.rs   — the whole game: terrain, water sim, objects, render, UI, camera (single module)
+  config.rs  — AppConfig (still old fields; adapt later)
+  camera.rs, textures.rs — unreferenced (old, kept for reference)
+```
+
 ## Where We Left Off (current)
 
-`src/bin/flood_demo.rs` on `feat/heightfield-water` now has the full core loop: channel
-flooding, current-carried weighted objects, object collisions, and grounded objects that
-dam/divert the flow.
+The heightfield flood game IS the main app on `feat/heightfield-water`: `cargo run` launches a
+meandering stream bed that floods; weighted blocks (sized by weight) are carried by the current,
+collide/pile, and dam/divert the flow; UI for weights + wave patterns; orbit camera; placement
+preview; pause.
 
 ## What Comes Next
-- **Integrate into the real game** — fold the heightfield sim + render out of the standalone
-  bin into the main app (lib + plugins); placement UI for terrain / objects / sources.
-- **Polish** — depth-based water color, shoreline foam, optional Gerstner ripples.
-- **Levels** — author channel / valley layouts; load terrain heightmaps.
-- **Object destruction** — let a strong enough current sweep away or break objects.
+- **Weir-model overtopping** — measure water depth from the ground (not a raised floor) and let
+  a block block flow up to its height, so upstream water rises *to the dam top* and crests over
+  as one continuous sheet — clean cresting with no tent artifact.
+- **Config + cleanup** — adapt `config.rs` fields to the heightfield game; drop now-unused deps
+  (rand stays — used by Random wave; `serde_json`/`rfd` go); remove `camera.rs`/`textures.rs`/old levels.
+- **Tests** — extract pure sim helpers (flow, buoyancy, obstacle) and unit-test them.
+- **Object destruction** — a strong enough current sweeps away or breaks objects.
+- **Levels** — author terrain heightmaps; save/load.
