@@ -139,12 +139,19 @@ A single deforming mesh (`W × D` vertices) is rebuilt each frame:
   catches light (the "watery" sheen).
 - Only **wet** quads are emitted — any corner with `depth > WET` — giving a clean
   shoreline; dry columns sit at terrain height so the water tapers to the bank.
-- A translucent, low-roughness `StandardMaterial` lets the sandy floor show
-  through.
+- A translucent, low-roughness `StandardMaterial` (white base, so per-vertex
+  colours drive the look) lets the floor show through.
+- **Depth shading** — per-vertex colour lerps **shallow → deep** (light, clear
+  blue → dark, more opaque, reaching darkest at `DEPTH_COLOR_MAX`), so pooled and
+  dammed water reads as deep while the flowing sheet reads as shallow.
 
 `step_ripples` drives the `ripple` field with a small damped wave equation
 (`RIPPLE_SPEED`, `RIPPLE_DAMP`, capped at `MAX_RIPPLE`) purely for visual
 liveliness — it does not affect the actual water volume.
+
+The **terrain** mesh (`build_terrain_mesh`) is height-shaded the same way:
+per-vertex colour lerps **light brown (low streambed) → green (high banks)** over
+`0 .. SLOPE_HEIGHT + BANK_MAX`, so elevation reads at a glance.
 
 ---
 
@@ -205,6 +212,7 @@ pour/erase (`draw_placement_cursor`).
 `CHANNEL_HW`, `BANK_K`, `BANK_MAX` (terrain) · `SOURCE_RATE`, `SINE_FREQ`,
 `RANDOM_INTERVAL` (source) · `FLOW_RATE`, `FLOW_ITERS`, `WET` (flow) ·
 `RIPPLE_SPEED`, `RIPPLE_DAMP`, `MAX_RIPPLE`, `RIPPLE_FADE` (ripples) ·
+`DEPTH_COLOR_MAX` (water depth shading) ·
 `BUOYANCY`, `DRAFT`, `VERT_EASE`, `FLOW_TO_SPEED`, `FLOW_EASE`, `REF_WEIGHT`
 (objects) · `OBJ_FOOTPRINT_MIN/MAX`, `OBJ_HEIGHT_MIN/MAX` (weight→size) ·
 `PANEL_WIDTH`, `WEIGHTS` (UI).

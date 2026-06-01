@@ -65,6 +65,7 @@ const RIPPLE_SPEED: f32 = 0.25;
 const RIPPLE_DAMP: f32 = 0.96;
 const MAX_RIPPLE: f32 = 4.0;
 const RIPPLE_FADE: f32 = 5.0; // ripples fade out in water shallower than this
+const DEPTH_COLOR_MAX: f32 = 25.0; // depth at which water reaches its darkest/most opaque
 
 fn span() -> f32 {
     (W - 1) as f32 * CELL
@@ -317,7 +318,8 @@ fn setup(
     commands.spawn((
         Mesh3d(meshes.add(terrain_mesh)),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.78, 0.64, 0.43),
+            // White base so the per-vertex height gradient (brown → green) shows.
+            base_color: Color::WHITE,
             perceptual_roughness: 0.95,
             ..default()
         })),
@@ -335,12 +337,14 @@ fn setup(
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; W * D]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; W * D]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; W * D]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.2f32, 0.4, 0.7, 0.5]; W * D]);
     mesh.insert_indices(Indices::U32(Vec::new()));
     let water_handle = meshes.add(mesh);
     commands.spawn((
         Mesh3d(water_handle.clone()),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.05, 0.42, 0.70, 0.55),
+            // White base so the per-vertex depth gradient (shallow → deep) drives the colour.
+            base_color: Color::WHITE,
             alpha_mode: AlphaMode::Blend,
             perceptual_roughness: 0.04,
             reflectance: 0.65,
@@ -1142,6 +1146,10 @@ fn update_water_mesh(
 
     let mut positions = vec![[0.0f32; 3]; W * D];
     let mut normals = vec![[0.0f32, 1.0, 0.0]; W * D];
+    let mut colors = vec![[0.0f32; 4]; W * D];
+    // Depth shading: shallow water is light and clear, deep water dark and more opaque.
+    let shallow = Color::srgba(0.42, 0.64, 0.86, 0.42).to_linear();
+    let deep = Color::srgba(0.02, 0.16, 0.40, 0.85).to_linear();
     for z in 0..D {
         for x in 0..W {
             let i = idx(x, z);
@@ -1152,6 +1160,13 @@ fn update_water_mesh(
             let hd = surf(idx(x, (z + 1).min(D - 1)));
             let n = Vec3::new(hl - hr, 2.0 * CELL, hu - hd).normalize();
             normals[i] = [n.x, n.y, n.z];
+            let dt = (d[i] / DEPTH_COLOR_MAX).clamp(0.0, 1.0);
+            colors[i] = [
+                shallow.red + (deep.red - shallow.red) * dt,
+                shallow.green + (deep.green - shallow.green) * dt,
+                shallow.blue + (deep.blue - shallow.blue) * dt,
+                shallow.alpha + (deep.alpha - shallow.alpha) * dt,
+            ];
         }
     }
 
@@ -1174,6 +1189,7 @@ fn update_water_mesh(
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
 }
 
@@ -1183,6 +1199,12 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
     let mut positions = vec![[0.0f32; 3]; W * D];
     let mut normals = vec![[0.0f32, 1.0, 0.0]; W * D];
     let mut uvs = vec![[0.0f32; 2]; W * D];
+    // Height gradient: light brown in the low streambed → green on the high
+    // banks, so elevation reads clearly.
+    let mut colors = vec![[1.0f32; 4]; W * D];
+    let sand = Color::srgb(0.80, 0.66, 0.44).to_linear();
+    let green = Color::srgb(0.38, 0.52, 0.26).to_linear();
+    let max_h = SLOPE_HEIGHT + BANK_MAX;
     for z in 0..D {
         for x in 0..W {
             let i = idx(x, z);
@@ -1194,6 +1216,13 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
             let n = Vec3::new(hl - hr, 2.0 * CELL, hu - hd).normalize();
             normals[i] = [n.x, n.y, n.z];
             uvs[i] = [0.0, 0.0];
+            let g = (t[i] / max_h).clamp(0.0, 1.0);
+            colors[i] = [
+                sand.red + (green.red - sand.red) * g,
+                sand.green + (green.green - sand.green) * g,
+                sand.blue + (green.blue - sand.blue) * g,
+                1.0,
+            ];
         }
     }
     let mut indices: Vec<u32> = Vec::with_capacity((W - 1) * (D - 1) * 6);
@@ -1210,6 +1239,7 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
 }

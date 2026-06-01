@@ -323,12 +323,31 @@ src/
   camera.rs, textures.rs — unreferenced (old, kept for reference)
 ```
 
+### Session 18 (Erase, height/depth gradients, docs)
+
+- **Erase tool** — panel button; with it selected, left-click deletes the nearest block to the
+  cursor (`handle_click` Erase arm, `handle_erase_button`, `EraseButton`); works while paused.
+- **Terrain height gradient** — `build_terrain_mesh` writes per-vertex colours lerping light
+  brown (low streambed) → green (high banks) over `0..SLOPE_HEIGHT+BANK_MAX`; terrain material
+  base is white so the gradient shows. Makes elevation legible.
+- **Water depth shading** — `update_water_mesh` writes per-vertex colours lerping shallow
+  (light, clear) → deep (dark, more opaque) by `depth/DEPTH_COLOR_MAX`; water material base is
+  white. Pools/dammed water read as deep, the flowing sheet as shallow.
+- **`docs/WATER_FLOW.md`** — step-by-step explanation of the water sim + a new-methods reference.
+- **Rendering note** — both terrain and water use the white-base-material + per-vertex
+  `ATTRIBUTE_COLOR` trick (vertex colours are LINEAR; build via `Color::srgb(..).to_linear()`).
+
 ## Where We Left Off (current)
 
 The heightfield flood game IS the main app on `feat/heightfield-water`: `cargo run` launches a
 meandering stream bed that floods; weighted blocks (sized by weight) are carried by the current,
-collide/pile, and dam/divert the flow; UI for weights + wave patterns; orbit camera; placement
-preview; pause.
+collide/pile, and dam/divert the flow. UI for weights + wave patterns + Pour + Erase; orbit
+camera; placement preview; pause (Space). Terrain is height-gradient shaded (brown→green) and
+water is depth-shaded (shallow→deep). Documented in `docs/WATER_FLOW.md`.
+
+Branch commits: `31b6831` look → `6b853e4` flooding+objects → `0d05b25` collision+damming →
+`9f7c14f` main-app integration+UI+camera+pause → `b6579e3` erase+docs → (this) gradients.
+Not yet pushed; old 2D code preserved on `main`.
 
 ## What Comes Next
 - **Weir-model overtopping** — measure water depth from the ground (not a raised floor) and let
