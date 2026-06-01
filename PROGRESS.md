@@ -219,10 +219,173 @@ Coastal environment fully implemented and on branch `feat/coastal-environment`. 
 
 ---
 
+### Session 12–13 (3D voxel experiment — parked)
+
+Explored converting the sim to a true 3D voxel simulation on branch
+`feat/3d-simulation` (`Grid3D`, face-culled cube meshes, pressure-based water,
+layer-by-layer editing, column-fill placement tools). It worked, but the voxel look
+was blocky and "didn't look better than the 2D original" for a lot of added machinery.
+Parked as a reference — not the direction.
+
+### Session 14 (Pivot: heightfield water surface)
+
+- **Decision** — after a design comparison (voxel-mesh vs heightfield vs particle/SPH
+  vs improved-voxels), pivoted to a **2.5D heightfield water surface**, branching off
+  `main`. A quick particle spike (`src/bin/particle_demo.rs`, since removed) confirmed
+  bare particles look like "ping pong balls" — water quality comes from a connected
+  *surface*, not particle motion.
+- **`src/bin/heightfield_demo.rs`** — proof-of-look spike (approved by the user): a
+  single deforming surface mesh (W×D grid of vertices) whose height is driven by a
+  **wave-equation** ripple sim; rendered as a translucent, low-roughness
+  `StandardMaterial` over a sandy floor with a directional light for sheen. Reads as
+  real water with **no custom shader**. Hold LMB to ripple, R to calm.
+- **Concepts learned** — wave equation (height + velocity, neighbour-average
+  Laplacian); building and mutating a `Mesh` each frame
+  (`ATTRIBUTE_POSITION` / `ATTRIBUTE_NORMAL` via `Assets::get_mut`); slope-based vertex
+  normals for lighting; `AlphaMode::Blend` translucency + low `perceptual_roughness`
+  for sheen; 3D camera ray → plane intersection for mouse picking; extra binaries via
+  `src/bin/` + `default-run` in Cargo.toml.
+
+### Session 15 (Flooding + weighted objects)
+
+- **`src/bin/flood_demo.rs`** — terrain + shallow-water flooding + weighted objects.
+  - **Terrain** — a downhill CHANNEL (floor slopes back→front, U-shaped side walls),
+    built once as a static mesh; water runs down it.
+  - **Flow** — mass-conserving "water finds its level" relaxation: each column sends
+    water to lower-surface neighbours (capped by available depth), so water flows
+    downhill and pools to a flat level. A source feeds the top; the front edge drains,
+    sustaining a current. A small visual ripple layer rides on top for liveliness.
+  - **Current field** — `step_flow` accumulates a per-cell `flow: Vec<Vec2>` (net water
+    movement). Floating objects drift toward `flow × FLOW_TO_SPEED × mobility`, so they
+    follow where the water is actually moving — not just the surface slope (which is
+    weak and vanishes in still/deep water, the reason an earlier surface-gradient push
+    barely moved things).
+  - **Weighted objects** (`FloatObject`) — float once the water can support them
+    (`depth × BUOYANCY ≥ weight`) and are carried by the current scaled by
+    `mobility = REF_WEIGHT / weight`: light blocks ride the flood, heavy ones resist.
+  - **Controls** — LMB pour, RMB drop a light object, R drain.
+- **Concepts** — deriving a per-cell current vector from transfer directions; buoyancy +
+  weight-based mobility; rebuilding a dynamic index buffer to clip the water mesh to a
+  clean waterline; Bevy `Mut` deref vs the borrow checker (use a temp local for
+  `a += a.something()` / `a = a.lerp(...)`).
+
+### Session 16 (Collision + two-way coupling)
+
+- **Object–object collision** (`object_collision`) — mass-weighted separation: overlapping
+  objects push apart, the lighter one moving more, so a heavy block holds its ground and
+  others pile against it. O(n²) over the (small) object set, applied via a per-Entity
+  correction map.
+- **Two-way coupling / damming** (`build_obstacles` + `Obstacle` resource) — a *grounded*
+  object (too heavy to float at its current depth) raises an effective floor under its
+  footprint; `step_flow` uses `terrain + obstacle` as the floor, so water **backs up behind
+  it and diverts around** it. Floating objects don't obstruct (they ride on top), which
+  keeps it physical.
+- Emergent result the user liked: the heavy block dams the channel, water splits around it,
+  and the diverted current carries the lighter blocks past.
+
+### Session 17 (Integration into the main app + controls)
+
+- **Promoted the prototype to the real app.** `src/bin/flood_demo.rs` → `src/flood.rs` as a
+  `FloodPlugin`; `main.rs` is now slim (load config, window + 60fps, `add_plugins(FloodPlugin)`).
+  `cargo run` (the BlueRush binary) launches the heightfield flood game.
+- **Retired the old 2D-voxel code** (the abandoned direction): deleted `simulation.rs`,
+  `render.rs`, `grid.rs`, `ui.rs`, `levels.rs`, `persistence.rs`, `undo.rs`, and the demo bins.
+  `camera.rs` / `textures.rs` left on disk, unreferenced (not in the module tree, so not
+  compiled). Kept a single-file `flood.rs` to avoid cross-module privacy churn (per the
+  integration-plan workflow's skeptic).
+- **UI panel** (`setup_ui` + handlers): OBJECTS weight buttons (200–5000 kg), a **Pour Water**
+  tool, and **WAVE** patterns — **Flood** (steady), **Sine** (pulsing), **Random** (gusty) —
+  modulating the source via `run_source`. Left-click applies the selected tool; clicks over
+  the panel are guarded by `cursor.x < PANEL_WIDTH`.
+- **Weight-scaled blocks** — `obj_footprint` / `obj_height` scale a block's size with weight
+  (sqrt-spaced); the unit cube mesh is scaled per object. Dam height + obstacle footprint are
+  tied to the block's size, so heavy blocks are big, tall, and dam more; collision spacing
+  scales too.
+- **Orbit camera** (`OrbitCamera` + `camera_controls`) — right-drag orbit, middle-drag pan,
+  scroll zoom (gentle, clamped), via `AccumulatedMouseMotion` / `AccumulatedMouseScroll`.
+- **Placement indicator** (`draw_placement_cursor`) — a gizmo wireframe box at the cursor
+  sized to the selected weight (flat square for Pour) showing where/how big the next drop lands.
+- **Pause** (`Paused` + `toggle_pause` / Pause button) — Space or the top button freezes the
+  water + object sim (the five sim systems early-return) while camera, placement, and rendering
+  keep running.
+- **Tried + reverted for overtopping:** foam-by-flow-speed (washed out) and rendering the water
+  surface up the obstacle floor (tented over blocks). Both looked bad; reverted to the clean
+  flat surface. Proper overtopping cresting needs a **weir-model** rework (see What Comes Next).
+- Note: deleting `simulation.rs` removed the old 2D unit tests; the flood game has no unit
+  tests yet (pure-function extraction + tests is a future cleanup).
+
+## Current File Structure (heightfield game)
+```
+src/
+  main.rs    — window/config + add_plugins(FloodPlugin)
+  flood.rs   — the whole game: terrain, water sim, objects, render, UI, camera (single module)
+  config.rs  — AppConfig (still old fields; adapt later)
+  camera.rs, textures.rs — unreferenced (old, kept for reference)
+```
+
+### Session 18 (Erase, height/depth gradients, docs)
+
+- **Erase tool** — panel button; with it selected, left-click deletes the nearest block to the
+  cursor (`handle_click` Erase arm, `handle_erase_button`, `EraseButton`); works while paused.
+- **Terrain height gradient** — `build_terrain_mesh` writes per-vertex colours lerping light
+  brown (low streambed) → green (high banks) over `0..SLOPE_HEIGHT+BANK_MAX`; terrain material
+  base is white so the gradient shows. Makes elevation legible.
+- **Water depth shading** — `update_water_mesh` writes per-vertex colours lerping shallow
+  (light, clear) → deep (dark, more opaque) by `depth/DEPTH_COLOR_MAX`; water material base is
+  white. Pools/dammed water read as deep, the flowing sheet as shallow.
+- **`docs/WATER_FLOW.md`** — step-by-step explanation of the water sim + a new-methods reference.
+- **Rendering note** — both terrain and water use the white-base-material + per-vertex
+  `ATTRIBUTE_COLOR` trick (vertex colours are LINEAR; build via `Color::srgb(..).to_linear()`).
+
+### Session 19 (Weir-model overtopping — water crests blocks)
+
+- **Problem** — water wouldn't crest over a grounded block: the surface dipped to a dry hole *at*
+  the block and surged *below* it ("goes down before, raises sharply after").
+- **Two coupled causes found:**
+  1. `step_flow` moved water on the *full* surface gap `si - sj`. A block raises its cell's floor
+     by its whole height (the `Obstacle` field), so when water crested onto a block cell the
+     ~full-height gap to the downstream cell dumped the entire column in one step — draining the
+     crest to a dry dip and surging the cell below.
+  2. `update_water_mesh` drew the surface at `terrain + depth`, ignoring the raised `obstacle`
+     floor the flow sim used — so crest water was drawn at bare ground, not on the block top.
+- **Fix — weir flux** (`step_flow`): flow is now driven by the head *above the sill* (the higher of
+  the two cells' floors): `sill = max(floor_i, floor_j)`, `head = max(0, surface - sill)`, move
+  `head_i - head_j`. A tall block dams until water backs up to its crest, then spills only the thin
+  overtopping layer. No artificial floor-raise in the depth bookkeeping → depth reads from ground.
+- **Fix — consistent render** (`update_water_mesh`): surface drawn at `terrain + obstacle + depth`,
+  matching the flow floor, so crest water sits on the block as a continuous sheet. Dry obstacle
+  cells stay below `WET` and aren't emitted (no water "tent" over an un-flooded block).
+- **Fix — tight footprint** (`build_obstacles`): the old footprint was a cell-radius + 1 margin,
+  ballooning to ~3× the cube (a big raised sandy shelf poking through the backed-up water). Now
+  only cells whose centre lies under `obj_footprint` are raised — the dammed area matches the cube.
+  Tradeoff: dropped the +1 gap-seal, so a row of blocks with a 1-cell gap can leak a thin stream;
+  place blocks touching to dam as a solid wall.
+- **Known remaining artifact (accepted):** the upstream crest cell renders its overtopping water as
+  a flat sheet sticking ~1 cell (~6 wu) past the block's back face — a grid-resolution effect, not a
+  bug. Left as-is; a clean fix needs sub-cell geometry near obstacles.
+- **Concepts** — weir/spillway flux limiting (move only water above the shared sill); keeping the
+  render floor consistent with the sim floor; matching a footprint mask to world-space extent
+  instead of a rounded cell radius.
+
+## Where We Left Off (current)
+
+Weir-model overtopping done on `feat/heightfield-water`: water backs up behind a grounded block and
+crests over it as a continuous sheet (lighter/shorter blocks crest readily; tall heavy blocks mostly
+dam and divert, which is physical). The heightfield flood game IS the main app: `cargo run` launches a
+meandering stream bed that floods; weighted blocks (sized by weight) are carried by the current,
+collide/pile, and dam/divert the flow. UI for weights + wave patterns + Pour + Erase; orbit
+camera; placement preview; pause (Space). Terrain is height-gradient shaded (brown→green) and
+water is depth-shaded (shallow→deep). Documented in `docs/WATER_FLOW.md`.
+
+Branch commits: `31b6831` look → `6b853e4` flooding+objects → `0d05b25` collision+damming →
+`9f7c14f` main-app integration+UI+camera+pause → `b6579e3` erase+docs → (this) gradients.
+Not yet pushed; old 2D code preserved on `main`.
+
 ## What Comes Next
-- **Harbour Inlet level** — author the level layout in `levels/harbour-inlet.json`
-- **Level select UI** — button/menu to switch between loaded level files
-- **Water rendering polish** — animated water surface, transparency, or wave effects
-- **Object interaction** — dragging placed objects, object-to-object collision
-- **Sound effects** — water flow, object placement, splash sounds
-- **Performance** — profile with large grids, consider chunk-based updates
+- **Crest-edge polish (optional)** — the upstream overtopping sheet sticks out ~1 cell past the
+  block back; needs finer geometry near obstacles if it ever bothers us.
+- **Config + cleanup** — adapt `config.rs` fields to the heightfield game; drop now-unused deps
+  (rand stays — used by Random wave; `serde_json`/`rfd` go); remove `camera.rs`/`textures.rs`/old levels.
+- **Tests** — extract pure sim helpers (flow, buoyancy, obstacle) and unit-test them.
+- **Object destruction** — a strong enough current sweeps away or breaks objects.
+- **Levels** — author terrain heightmaps; save/load.
