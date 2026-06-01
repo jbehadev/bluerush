@@ -2,6 +2,8 @@
 name = "BlueRush"
 version = "0.1.0"
 edition = "2024"
+# Keep `cargo run` pointed at the main game even though src/bin/ adds extra binaries.
+default-run = "BlueRush"
 
 [dependencies]
 bevy = "0.18"

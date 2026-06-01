@@ -219,10 +219,43 @@ Coastal environment fully implemented and on branch `feat/coastal-environment`. 
 
 ---
 
-## What Comes Next
-- **Harbour Inlet level** — author the level layout in `levels/harbour-inlet.json`
-- **Level select UI** — button/menu to switch between loaded level files
-- **Water rendering polish** — animated water surface, transparency, or wave effects
-- **Object interaction** — dragging placed objects, object-to-object collision
-- **Sound effects** — water flow, object placement, splash sounds
-- **Performance** — profile with large grids, consider chunk-based updates
+### Session 12–13 (3D voxel experiment — parked)
+
+Explored converting the sim to a true 3D voxel simulation on branch
+`feat/3d-simulation` (`Grid3D`, face-culled cube meshes, pressure-based water,
+layer-by-layer editing, column-fill placement tools). It worked, but the voxel look
+was blocky and "didn't look better than the 2D original" for a lot of added machinery.
+Parked as a reference — not the direction.
+
+### Session 14 (Pivot: heightfield water surface)
+
+- **Decision** — after a design comparison (voxel-mesh vs heightfield vs particle/SPH
+  vs improved-voxels), pivoted to a **2.5D heightfield water surface**, branching off
+  `main`. A quick particle spike (`src/bin/particle_demo.rs`, since removed) confirmed
+  bare particles look like "ping pong balls" — water quality comes from a connected
+  *surface*, not particle motion.
+- **`src/bin/heightfield_demo.rs`** — proof-of-look spike (approved by the user): a
+  single deforming surface mesh (W×D grid of vertices) whose height is driven by a
+  **wave-equation** ripple sim; rendered as a translucent, low-roughness
+  `StandardMaterial` over a sandy floor with a directional light for sheen. Reads as
+  real water with **no custom shader**. Hold LMB to ripple, R to calm.
+- **Concepts learned** — wave equation (height + velocity, neighbour-average
+  Laplacian); building and mutating a `Mesh` each frame
+  (`ATTRIBUTE_POSITION` / `ATTRIBUTE_NORMAL` via `Assets::get_mut`); slope-based vertex
+  normals for lighting; `AlphaMode::Blend` translucency + low `perceptual_roughness`
+  for sheen; 3D camera ray → plane intersection for mouse picking; extra binaries via
+  `src/bin/` + `default-run` in Cargo.toml.
+
+## Where We Left Off (current)
+
+Heightfield water-surface look **approved** on branch `feat/heightfield-water`. The demo
+is the rendering foundation; the real game gets built on top next.
+
+## What Comes Next (heightfield direction)
+- **Terrain / basin** — shape a height into the floor (a valley or bowl) for water to sit in.
+- **Shallow-water flow** — replace the ripple wave-equation with a pipe / shallow-water
+  model so water **floods and pools** (rises to a flat level, flows downhill) from a source.
+- **Weighted objects** — drop objects on the surface; the flood pushes/floats them by weight
+  (reuse the 3-pass MoveIntent *feel* from the old sim, driven by the height gradient).
+- **Placement + UI** — paint terrain, place objects / water sources on the (x,z) plane.
+- **Polish** — depth-based water color, shoreline foam, optional Gerstner ripples.
