@@ -143,6 +143,7 @@ struct Obstacle(Vec<f32>);
 enum SelectedTool {
     Object(f32),
     Pour,
+    Erase,
 }
 
 /// How the water source feeds the stream.
@@ -173,6 +174,8 @@ struct OrbitCamera {
 struct WeightButton(f32);
 #[derive(Component)]
 struct PourButton;
+#[derive(Component)]
+struct EraseButton;
 #[derive(Component)]
 struct WaveButton(WavePattern);
 
@@ -262,6 +265,7 @@ impl Plugin for FloodPlugin {
                 (
                     handle_weight_buttons,
                     handle_pour_button,
+                    handle_erase_button,
                     handle_wave_buttons,
                     update_tool_highlight,
                     update_wave_highlight,
@@ -444,6 +448,7 @@ fn handle_click(
     mut water: ResMut<Water>,
     assets: Res<ObjectAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    objects: Query<(Entity, &FloatObject)>,
     mut commands: Commands,
 ) {
     let Ok(window) = windows.single() else { return };
@@ -477,6 +482,24 @@ fn handle_click(
         SelectedTool::Object(w) => {
             if mouse.just_pressed(MouseButton::Left) {
                 spawn_object(&mut commands, assets.cube.clone(), &mut materials, Vec2::new(hit.x, hit.z), w);
+            }
+        }
+        SelectedTool::Erase => {
+            if mouse.just_pressed(MouseButton::Left) {
+                // Delete the object nearest the cursor (within ~its footprint).
+                let target = Vec2::new(hit.x, hit.z);
+                let mut best: Option<(Entity, f32)> = None;
+                for (e, obj) in &objects {
+                    let dist = obj.pos.distance(target);
+                    if dist < obj_footprint(obj.weight) * 0.7
+                        && best.map_or(true, |(_, bd)| dist < bd)
+                    {
+                        best = Some((e, dist));
+                    }
+                }
+                if let Some((e, _)) = best {
+                    commands.entity(e).despawn();
+                }
             }
         }
     }
@@ -576,6 +599,27 @@ fn setup_ui(mut commands: Commands) {
                 .with_children(|b| {
                     b.spawn((
                         Text::new("Pour Water"),
+                        TextFont { font_size: 11.0, ..default() },
+                        TextColor(Color::WHITE),
+                    ));
+                });
+            panel
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(26.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        margin: UiRect::top(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.45, 0.20, 0.18)),
+                    EraseButton,
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        Text::new("Erase"),
                         TextFont { font_size: 11.0, ..default() },
                         TextColor(Color::WHITE),
                     ));
@@ -684,6 +728,17 @@ fn handle_pour_button(
     }
 }
 
+fn handle_erase_button(
+    q: Query<&Interaction, (Changed<Interaction>, With<EraseButton>)>,
+    mut tool: ResMut<SelectedTool>,
+) {
+    for interaction in &q {
+        if *interaction == Interaction::Pressed {
+            *tool = SelectedTool::Erase;
+        }
+    }
+}
+
 fn handle_wave_buttons(
     q: Query<(&Interaction, &WaveButton), Changed<Interaction>>,
     mut wave: ResMut<Wave>,
@@ -699,6 +754,10 @@ fn update_tool_highlight(
     tool: Res<SelectedTool>,
     mut weights: Query<(&WeightButton, &mut BackgroundColor)>,
     mut pour: Query<&mut BackgroundColor, (With<PourButton>, Without<WeightButton>)>,
+    mut erase: Query<
+        &mut BackgroundColor,
+        (With<EraseButton>, Without<WeightButton>, Without<PourButton>),
+    >,
 ) {
     if !tool.is_changed() {
         return;
@@ -708,6 +767,11 @@ fn update_tool_highlight(
     }
     for mut bg in &mut pour {
         *bg = BackgroundColor(if *tool == SelectedTool::Pour { POUR_ON } else { POUR_OFF });
+    }
+    for mut bg in &mut erase {
+        let on = Color::srgb(0.90, 0.35, 0.30);
+        let off = Color::srgb(0.45, 0.20, 0.18);
+        *bg = BackgroundColor(if *tool == SelectedTool::Erase { on } else { off });
     }
 }
 
@@ -871,6 +935,18 @@ fn draw_placement_cursor(
             let y = ground + 0.5;
             let s = 12.0;
             let p = |dx: f32, dz: f32| Vec3::new(hit.x + dx, y, hit.z + dz);
+            edge(p(-s, -s), p(s, -s), col);
+            edge(p(s, -s), p(s, s), col);
+            edge(p(s, s), p(-s, s), col);
+            edge(p(-s, s), p(-s, -s), col);
+        }
+        SelectedTool::Erase => {
+            let col = Color::srgb(0.95, 0.30, 0.25);
+            let y = ground + 0.5;
+            let s = 12.0;
+            let p = |dx: f32, dz: f32| Vec3::new(hit.x + dx, y, hit.z + dz);
+            edge(p(-s, -s), p(s, s), col);
+            edge(p(s, -s), p(-s, s), col); // an X to read as "delete"
             edge(p(-s, -s), p(s, -s), col);
             edge(p(s, -s), p(s, s), col);
             edge(p(s, s), p(-s, s), col);
