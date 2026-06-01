@@ -269,15 +269,29 @@ Parked as a reference — not the direction.
   clean waterline; Bevy `Mut` deref vs the borrow checker (use a temp local for
   `a += a.something()` / `a = a.lerp(...)`).
 
+### Session 16 (Collision + two-way coupling)
+
+- **Object–object collision** (`object_collision`) — mass-weighted separation: overlapping
+  objects push apart, the lighter one moving more, so a heavy block holds its ground and
+  others pile against it. O(n²) over the (small) object set, applied via a per-Entity
+  correction map.
+- **Two-way coupling / damming** (`build_obstacles` + `Obstacle` resource) — a *grounded*
+  object (too heavy to float at its current depth) raises an effective floor under its
+  footprint; `step_flow` uses `terrain + obstacle` as the floor, so water **backs up behind
+  it and diverts around** it. Floating objects don't obstruct (they ride on top), which
+  keeps it physical.
+- Emergent result the user liked: the heavy block dams the channel, water splits around it,
+  and the diverted current carries the lighter blocks past.
+
 ## Where We Left Off (current)
 
-Flooding + weighted objects working in `src/bin/flood_demo.rs` on branch
-`feat/heightfield-water`: a channel floods, water is carried as a current, light objects
-wash downstream and heavy ones hold.
+`src/bin/flood_demo.rs` on `feat/heightfield-water` now has the full core loop: channel
+flooding, current-carried weighted objects, object collisions, and grounded objects that
+dam/divert the flow.
 
 ## What Comes Next
-- **Object–object collision** and two-way coupling (objects dam / divert the water).
-- **Integrate into the real game** — fold the heightfield sim + render into the main app
-  (lib + plugins) instead of a standalone bin; add placement UI for terrain / objects / sources.
+- **Integrate into the real game** — fold the heightfield sim + render out of the standalone
+  bin into the main app (lib + plugins); placement UI for terrain / objects / sources.
 - **Polish** — depth-based water color, shoreline foam, optional Gerstner ripples.
 - **Levels** — author channel / valley layouts; load terrain heightmaps.
+- **Object destruction** — let a strong enough current sweep away or break objects.

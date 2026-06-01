@@ -15,6 +15,7 @@
 use bevy::prelude::*;
 use bevy_asset::RenderAssetUsages;
 use bevy_mesh::{Indices, PrimitiveTopology};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -39,6 +40,9 @@ const VERT_EASE: f32 = 0.15; // how fast an object eases toward its target heigh
 const FLOW_TO_SPEED: f32 = 80.0; // converts the local current into a drift speed
 const FLOW_EASE: f32 = 0.12; // how fast an object's velocity matches the current
 const REF_WEIGHT: f32 = 150.0; // a "light" object; mobility = REF_WEIGHT / weight (capped at 1)
+const COLLIDE_DIST: f32 = OBJ_SIZE; // objects closer than this push apart
+const OBSTACLE_HEIGHT: f32 = 9.0; // how high a grounded object dams the water column
+const OBSTACLE_R: i32 = 1; // grounded-object footprint radius (cells) for damming
 const FLOW_RATE: f32 = 0.5; // fraction of the surface gap equalised per iteration
 const FLOW_ITERS: usize = 8; // flow iterations per frame (faster spreading = no spike)
 const DT: f32 = 1.0 / 60.0;
@@ -106,6 +110,11 @@ struct ObjectAssets {
     cube: Handle<Mesh>,
 }
 
+/// Per-cell extra floor height contributed by grounded objects. Raises the
+/// effective terrain in the flow so water dams behind and diverts around them.
+#[derive(Resource)]
+struct Obstacle(Vec<f32>);
+
 /// Object colour by weight: light = pale wood, heavy = dark stone.
 fn weight_color(weight: f32) -> Color {
     let t = (weight / 4000.0).clamp(0.0, 1.0).sqrt();
@@ -160,9 +169,11 @@ fn main() {
                 drain_on_key,
                 source_and_pour,
                 right_click_drop,
+                build_obstacles,
                 step_flow,
                 step_ripples,
                 object_physics,
+                object_collision,
                 sync_objects,
                 update_water_mesh,
             )
@@ -226,17 +237,77 @@ fn setup(
 
     // Object spawning assets + a starter trio (light / medium / heavy) so the
     // weight difference is visible as the bowl floods.
-    // Place the trio mid-channel (upstream of centre) so the current washes
-    // the light one downstream while the heavy one resists.
+    // Heavy block in the channel centre (it grounds and dams the flow); a light
+    // and a medium block to the sides get washed around it.
     let cube = meshes.add(Cuboid::new(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE));
-    spawn_object(&mut commands, cube.clone(), &mut materials, Vec2::new(-45.0, -40.0), 150.0);
-    spawn_object(&mut commands, cube.clone(), &mut materials, Vec2::new(0.0, -40.0), 800.0);
-    spawn_object(&mut commands, cube.clone(), &mut materials, Vec2::new(45.0, -40.0), 4000.0);
+    spawn_object(&mut commands, cube.clone(), &mut materials, Vec2::new(0.0, 0.0), 4000.0);
+    spawn_object(&mut commands, cube.clone(), &mut materials, Vec2::new(-50.0, -60.0), 150.0);
+    spawn_object(&mut commands, cube.clone(), &mut materials, Vec2::new(50.0, -60.0), 800.0);
 
     commands.insert_resource(Terrain(terrain));
     commands.insert_resource(water);
     commands.insert_resource(WaterMesh(water_handle));
     commands.insert_resource(ObjectAssets { cube });
+    commands.insert_resource(Obstacle(vec![0.0; W * D]));
+}
+
+/// Mark cells under grounded (can't-float) objects as raised floor, so the flow
+/// dams behind them and diverts around. Floating objects don't obstruct.
+fn build_obstacles(water: Res<Water>, objs: Query<&FloatObject>, mut obstacle: ResMut<Obstacle>) {
+    for o in obstacle.0.iter_mut() {
+        *o = 0.0;
+    }
+    for obj in &objs {
+        let (gx, gz) = cell_of(obj.pos);
+        let depth = water.depth[idx(gx, gz)];
+        let grounded = obj.weight > depth * BUOYANCY; // too heavy to float here → it dams
+        if !grounded {
+            continue;
+        }
+        for dz in -OBSTACLE_R..=OBSTACLE_R {
+            for dx in -OBSTACLE_R..=OBSTACLE_R {
+                let x = gx as i32 + dx;
+                let z = gz as i32 + dz;
+                if x < 0 || z < 0 || x >= W as i32 || z >= D as i32 {
+                    continue;
+                }
+                let c = idx(x as usize, z as usize);
+                obstacle.0[c] = obstacle.0[c].max(OBSTACLE_HEIGHT);
+            }
+        }
+    }
+}
+
+/// Separate overlapping objects (mass-weighted): the lighter one gets shoved
+/// more, so a heavy block holds its ground and others pile against it.
+fn object_collision(mut q: Query<(Entity, &mut FloatObject)>) {
+    let items: Vec<(Entity, Vec2, f32)> = q.iter().map(|(e, o)| (e, o.pos, o.weight)).collect();
+    let n = items.len();
+    let mut corr: HashMap<Entity, Vec2> = HashMap::new();
+
+    for a in 0..n {
+        for b in (a + 1)..n {
+            let d = items[a].1 - items[b].1;
+            let dist = d.length();
+            if dist < COLLIDE_DIST && dist > 1e-4 {
+                let overlap = COLLIDE_DIST - dist;
+                let dir = d / dist;
+                let (wa, wb) = (items[a].2, items[b].2);
+                let total = wa + wb;
+                *corr.entry(items[a].0).or_default() += dir * (overlap * wb / total);
+                *corr.entry(items[b].0).or_default() -= dir * (overlap * wa / total);
+            }
+        }
+    }
+
+    let bound = half() - CELL;
+    for (e, mut obj) in &mut q {
+        if let Some(c) = corr.get(&e) {
+            obj.pos += *c;
+            obj.pos.x = obj.pos.x.clamp(-bound, bound);
+            obj.pos.y = obj.pos.y.clamp(-bound, bound);
+        }
+    }
 }
 
 /// Right-click drops a light object at the cursor (fun to watch it drift).
@@ -378,9 +449,12 @@ fn add_water(water: &mut Water, cx: usize, cz: usize, r: i32, amount: f32, rippl
 /// lower-surface neighbours, capped so it never sends more than it holds — so
 /// water flows downhill, pools in the bowl, and settles to a flat surface.
 /// Mass-conserving via a delta buffer (all transfers applied at once).
-fn step_flow(terrain: Res<Terrain>, mut water: ResMut<Water>) {
+fn step_flow(terrain: Res<Terrain>, obstacle: Res<Obstacle>, mut water: ResMut<Water>) {
     const NB: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
     let t = &terrain.0;
+    let obs = &obstacle.0;
+    // Effective floor = terrain raised by any grounded-object obstacle.
+    let floor = |i: usize| t[i] + obs[i];
 
     // Accumulate the net water movement (current) per cell across all iterations.
     let mut flow = vec![Vec2::ZERO; W * D];
@@ -396,7 +470,7 @@ fn step_flow(terrain: Res<Terrain>, mut water: ResMut<Water>) {
                 if avail <= 0.0 {
                     continue;
                 }
-                let si = t[i] + d[i];
+                let si = floor(i) + d[i];
 
                 let mut lower: [(usize, f32, Vec2); 4] = [(0, 0.0, Vec2::ZERO); 4];
                 let mut count = 0;
@@ -408,7 +482,7 @@ fn step_flow(terrain: Res<Terrain>, mut water: ResMut<Water>) {
                         continue;
                     }
                     let j = idx(nx as usize, nz as usize);
-                    let sj = t[j] + d[j];
+                    let sj = floor(j) + d[j];
                     if si > sj {
                         let gap = si - sj;
                         lower[count] = (j, gap, Vec2::new(dx as f32, dz as f32));
