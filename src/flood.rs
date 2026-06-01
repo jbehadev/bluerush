@@ -387,10 +387,14 @@ fn build_obstacles(water: Res<Water>, objs: Query<&FloatObject>, mut obstacle: R
         if !grounded {
             continue;
         }
-        // Dam height tied to weight (taller blocks dam higher); footprint widened
-        // to the block's size + 1 cell so a row of blocks seals the gaps between them.
+        // Dam height tied to weight (taller blocks dam higher). Only raise cells
+        // whose centre actually lies under the block footprint — no extra margin —
+        // so the dammed (dry) area matches the cube and doesn't poke up through the
+        // backed-up water as an oversized sandy shelf.
         let dam = obj_height(obj.weight);
-        let r = ((obj_footprint(obj.weight) * 0.5 / CELL).round() as i32).max(1) + 1;
+        let hw = obj_footprint(obj.weight) * 0.5; // block half-width (world units)
+        let r = (hw / CELL).ceil() as i32;
+        let off = half();
         for dz in -r..=r {
             for dx in -r..=r {
                 let x = gx as i32 + dx;
@@ -398,8 +402,12 @@ fn build_obstacles(water: Res<Water>, objs: Query<&FloatObject>, mut obstacle: R
                 if x < 0 || z < 0 || x >= W as i32 || z >= D as i32 {
                     continue;
                 }
-                let c = idx(x as usize, z as usize);
-                obstacle.0[c] = obstacle.0[c].max(dam);
+                let cxw = x as f32 * CELL - off;
+                let czw = z as f32 * CELL - off;
+                if (cxw - obj.pos.x).abs() <= hw && (czw - obj.pos.y).abs() <= hw {
+                    let c = idx(x as usize, z as usize);
+                    obstacle.0[c] = obstacle.0[c].max(dam);
+                }
             }
         }
     }
@@ -1046,7 +1054,8 @@ fn step_flow(terrain: Res<Terrain>, obstacle: Res<Obstacle>, paused: Res<Paused>
                 if avail <= 0.0 {
                     continue;
                 }
-                let si = floor(i) + d[i];
+                let floor_i = floor(i);
+                let si = floor_i + d[i];
 
                 let mut lower: [(usize, f32, Vec2); 4] = [(0, 0.0, Vec2::ZERO); 4];
                 let mut count = 0;
@@ -1058,9 +1067,19 @@ fn step_flow(terrain: Res<Terrain>, obstacle: Res<Obstacle>, paused: Res<Paused>
                         continue;
                     }
                     let j = idx(nx as usize, nz as usize);
-                    let sj = floor(j) + d[j];
-                    if si > sj {
-                        let gap = si - sj;
+                    let fj = floor(j);
+                    let sj = fj + d[j];
+                    // Weir flux: water can only move over the higher of the two
+                    // floors (the "sill"). The drivable head is the surface above
+                    // that sill, so a tall obstacle dams the flow until water backs
+                    // up to its crest, then spills only the thin overtopping layer.
+                    // (The old `si - sj` gap dumped the whole column over a block in
+                    // one step — draining the crest to a dry dip and surging below.)
+                    let sill = floor_i.max(fj);
+                    let head_i = (si - sill).max(0.0);
+                    let head_j = (sj - sill).max(0.0);
+                    if head_i > head_j {
+                        let gap = head_i - head_j;
                         lower[count] = (j, gap, Vec2::new(dx as f32, dz as f32));
                         total_gap += gap;
                         count += 1;
@@ -1129,19 +1148,25 @@ fn step_ripples(paused: Res<Paused>, mut water: ResMut<Water>) {
 /// terrain + depth + ripple; only quads with water are emitted (clean shore).
 fn update_water_mesh(
     terrain: Res<Terrain>,
+    obstacle: Res<Obstacle>,
     water: Res<Water>,
     handle: Res<WaterMesh>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Some(mesh) = meshes.get_mut(handle.0.id()) else { return };
     let t = &terrain.0;
+    let obs = &obstacle.0;
     let d = &water.depth;
     let off = half();
 
-    // Surface elevation per vertex; ripple fades out in shallow water.
+    // Surface elevation per vertex; ripple fades out in shallow water. Water rests
+    // on the obstacle top (terrain + obstacle), matching the flow sim, so water that
+    // crests a block is drawn on top of it as a continuous sheet rather than dropping
+    // back to bare ground. Dry obstacle cells stay below WET and aren't emitted, so
+    // there's no water "tent" over an un-flooded block.
     let surf = |i: usize| {
         let fade = (d[i] / RIPPLE_FADE).clamp(0.0, 1.0);
-        t[i] + d[i] + water.ripple[i] * fade
+        t[i] + obs[i] + d[i] + water.ripple[i] * fade
     };
 
     let mut positions = vec![[0.0f32; 3]; W * D];

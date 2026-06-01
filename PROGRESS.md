@@ -337,9 +337,41 @@ src/
 - **Rendering note** — both terrain and water use the white-base-material + per-vertex
   `ATTRIBUTE_COLOR` trick (vertex colours are LINEAR; build via `Color::srgb(..).to_linear()`).
 
+### Session 19 (Weir-model overtopping — water crests blocks)
+
+- **Problem** — water wouldn't crest over a grounded block: the surface dipped to a dry hole *at*
+  the block and surged *below* it ("goes down before, raises sharply after").
+- **Two coupled causes found:**
+  1. `step_flow` moved water on the *full* surface gap `si - sj`. A block raises its cell's floor
+     by its whole height (the `Obstacle` field), so when water crested onto a block cell the
+     ~full-height gap to the downstream cell dumped the entire column in one step — draining the
+     crest to a dry dip and surging the cell below.
+  2. `update_water_mesh` drew the surface at `terrain + depth`, ignoring the raised `obstacle`
+     floor the flow sim used — so crest water was drawn at bare ground, not on the block top.
+- **Fix — weir flux** (`step_flow`): flow is now driven by the head *above the sill* (the higher of
+  the two cells' floors): `sill = max(floor_i, floor_j)`, `head = max(0, surface - sill)`, move
+  `head_i - head_j`. A tall block dams until water backs up to its crest, then spills only the thin
+  overtopping layer. No artificial floor-raise in the depth bookkeeping → depth reads from ground.
+- **Fix — consistent render** (`update_water_mesh`): surface drawn at `terrain + obstacle + depth`,
+  matching the flow floor, so crest water sits on the block as a continuous sheet. Dry obstacle
+  cells stay below `WET` and aren't emitted (no water "tent" over an un-flooded block).
+- **Fix — tight footprint** (`build_obstacles`): the old footprint was a cell-radius + 1 margin,
+  ballooning to ~3× the cube (a big raised sandy shelf poking through the backed-up water). Now
+  only cells whose centre lies under `obj_footprint` are raised — the dammed area matches the cube.
+  Tradeoff: dropped the +1 gap-seal, so a row of blocks with a 1-cell gap can leak a thin stream;
+  place blocks touching to dam as a solid wall.
+- **Known remaining artifact (accepted):** the upstream crest cell renders its overtopping water as
+  a flat sheet sticking ~1 cell (~6 wu) past the block's back face — a grid-resolution effect, not a
+  bug. Left as-is; a clean fix needs sub-cell geometry near obstacles.
+- **Concepts** — weir/spillway flux limiting (move only water above the shared sill); keeping the
+  render floor consistent with the sim floor; matching a footprint mask to world-space extent
+  instead of a rounded cell radius.
+
 ## Where We Left Off (current)
 
-The heightfield flood game IS the main app on `feat/heightfield-water`: `cargo run` launches a
+Weir-model overtopping done on `feat/heightfield-water`: water backs up behind a grounded block and
+crests over it as a continuous sheet (lighter/shorter blocks crest readily; tall heavy blocks mostly
+dam and divert, which is physical). The heightfield flood game IS the main app: `cargo run` launches a
 meandering stream bed that floods; weighted blocks (sized by weight) are carried by the current,
 collide/pile, and dam/divert the flow. UI for weights + wave patterns + Pour + Erase; orbit
 camera; placement preview; pause (Space). Terrain is height-gradient shaded (brown→green) and
@@ -350,9 +382,8 @@ Branch commits: `31b6831` look → `6b853e4` flooding+objects → `0d05b25` coll
 Not yet pushed; old 2D code preserved on `main`.
 
 ## What Comes Next
-- **Weir-model overtopping** — measure water depth from the ground (not a raised floor) and let
-  a block block flow up to its height, so upstream water rises *to the dam top* and crests over
-  as one continuous sheet — clean cresting with no tent artifact.
+- **Crest-edge polish (optional)** — the upstream overtopping sheet sticks out ~1 cell past the
+  block back; needs finer geometry near obstacles if it ever bothers us.
 - **Config + cleanup** — adapt `config.rs` fields to the heightfield game; drop now-unused deps
   (rand stays — used by Random wave; `serde_json`/`rfd` go); remove `camera.rs`/`textures.rs`/old levels.
 - **Tests** — extract pure sim helpers (flow, buoyancy, obstacle) and unit-test them.
