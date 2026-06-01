@@ -246,16 +246,38 @@ Parked as a reference — not the direction.
   for sheen; 3D camera ray → plane intersection for mouse picking; extra binaries via
   `src/bin/` + `default-run` in Cargo.toml.
 
+### Session 15 (Flooding + weighted objects)
+
+- **`src/bin/flood_demo.rs`** — terrain + shallow-water flooding + weighted objects.
+  - **Terrain** — a downhill CHANNEL (floor slopes back→front, U-shaped side walls),
+    built once as a static mesh; water runs down it.
+  - **Flow** — mass-conserving "water finds its level" relaxation: each column sends
+    water to lower-surface neighbours (capped by available depth), so water flows
+    downhill and pools to a flat level. A source feeds the top; the front edge drains,
+    sustaining a current. A small visual ripple layer rides on top for liveliness.
+  - **Current field** — `step_flow` accumulates a per-cell `flow: Vec<Vec2>` (net water
+    movement). Floating objects drift toward `flow × FLOW_TO_SPEED × mobility`, so they
+    follow where the water is actually moving — not just the surface slope (which is
+    weak and vanishes in still/deep water, the reason an earlier surface-gradient push
+    barely moved things).
+  - **Weighted objects** (`FloatObject`) — float once the water can support them
+    (`depth × BUOYANCY ≥ weight`) and are carried by the current scaled by
+    `mobility = REF_WEIGHT / weight`: light blocks ride the flood, heavy ones resist.
+  - **Controls** — LMB pour, RMB drop a light object, R drain.
+- **Concepts** — deriving a per-cell current vector from transfer directions; buoyancy +
+  weight-based mobility; rebuilding a dynamic index buffer to clip the water mesh to a
+  clean waterline; Bevy `Mut` deref vs the borrow checker (use a temp local for
+  `a += a.something()` / `a = a.lerp(...)`).
+
 ## Where We Left Off (current)
 
-Heightfield water-surface look **approved** on branch `feat/heightfield-water`. The demo
-is the rendering foundation; the real game gets built on top next.
+Flooding + weighted objects working in `src/bin/flood_demo.rs` on branch
+`feat/heightfield-water`: a channel floods, water is carried as a current, light objects
+wash downstream and heavy ones hold.
 
-## What Comes Next (heightfield direction)
-- **Terrain / basin** — shape a height into the floor (a valley or bowl) for water to sit in.
-- **Shallow-water flow** — replace the ripple wave-equation with a pipe / shallow-water
-  model so water **floods and pools** (rises to a flat level, flows downhill) from a source.
-- **Weighted objects** — drop objects on the surface; the flood pushes/floats them by weight
-  (reuse the 3-pass MoveIntent *feel* from the old sim, driven by the height gradient).
-- **Placement + UI** — paint terrain, place objects / water sources on the (x,z) plane.
+## What Comes Next
+- **Object–object collision** and two-way coupling (objects dam / divert the water).
+- **Integrate into the real game** — fold the heightfield sim + render into the main app
+  (lib + plugins) instead of a standalone bin; add placement UI for terrain / objects / sources.
 - **Polish** — depth-based water color, shoreline foam, optional Gerstner ripples.
+- **Levels** — author channel / valley layouts; load terrain heightmaps.
