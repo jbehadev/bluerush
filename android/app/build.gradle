@@ -39,6 +39,10 @@ dependencies {
     // Supplies com.google.androidgamesdk.GameActivity, the activity that loads
     // the Rust cdylib. Must stay in step with the android-activity crate that
     // Bevy pulls in via its default `android-game-activity` feature.
+    //
+    // Deliberately the only dependency: GameActivity extends android.app.Activity,
+    // so appcompat is not needed. Pulling it in produced duplicate Kotlin stdlib
+    // classes, since appcompat wants kotlin-stdlib 1.8.x while games-activity
+    // brings the pre-merge kotlin-stdlib-jdk7/jdk8 1.6.21 artifacts.
     implementation "androidx.games:games-activity:3.0.5"
-    implementation "androidx.appcompat:appcompat:1.7.0"
 }

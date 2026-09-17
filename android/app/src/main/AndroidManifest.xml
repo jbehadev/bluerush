@@ -7,7 +7,7 @@
     <application
         android:label="BlueRush"
         android:allowBackup="true"
-        android:theme="@style/Theme.AppCompat.NoActionBar">
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
         <activity
             android:name="com.google.androidgamesdk.GameActivity"
