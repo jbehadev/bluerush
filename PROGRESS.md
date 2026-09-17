@@ -226,3 +226,21 @@ Coastal environment fully implemented and on branch `feat/coastal-environment`. 
 - **Object interaction** — dragging placed objects, object-to-object collision
 - **Sound effects** — water flow, object placement, splash sounds
 - **Performance** — profile with large grids, consider chunk-based updates
+
+---
+
+# Session: Ambient Lighting
+
+## What Was Built
+- **Global ambient light** — `setup_render` in `render.rs` now inserts a `GlobalAmbientLight` resource alongside the directional "sun". Previously only the `DirectionalLight` lit the scene; Bevy's default ambient brightness (80 cd/m²) is about 2% of the luminance of a face fully facing a 12000 lux light, so cube faces angled away from the sun rendered near-black.
+- **Tuning constants** — `SUN_ILLUMINANCE` (12000 lux, extracted from the inline literal), `AMBIENT_BRIGHTNESS` (600 cd/m²) and `AMBIENT_COLOR` (`srgb(0.75, 0.85, 1.0)`, a pale sky blue matching the `ClearColor`) are now named constants at the top of `render.rs` next to the other render tuning values.
+
+## Concepts Learned
+- Bevy 0.18 splits ambient light into `GlobalAmbientLight` (a resource, scene-wide) and `AmbientLight` (a component that overrides the global value for one camera). `LightPlugin` inserts the resource by default, so overriding it means replacing the resource rather than spawning an entity.
+- Units differ between light types: `DirectionalLight::illuminance` is in lux, ambient `brightness` is in cd/m². In the PBR shader the directional term goes through a `1/π` Lambert normalisation while the ambient term does not, so a lit face sits near `illuminance / π` and ambient brightness has to be compared against that — hence 600 cd/m² landing at roughly 15% of a fully lit face.
+
+## Where We Left Off
+Ambient light change committed on branch `claude/todo-list-first-item-fkybay`. First item of `TODO.md` ("Visual Polish → ambient light") ticked off.
+
+## What Comes Next
+- Next TODO item: vary object tile height by weight so heavier objects are visually distinguishable beyond colour shade.

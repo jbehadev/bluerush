@@ -1,7 +1,7 @@
 # TODO — BlueRush Game Improvements
 
 ## Visual Polish
-- [ ] Add ambient light so cube faces not hit by the directional light aren't pure black
+- [x] Add ambient light so cube faces not hit by the directional light aren't pure black
 - [ ] Vary object tile height by weight (heavier = taller) so they're visually distinguishable beyond color shade
 - [ ] Add weight labels or icons on object tiles
 - [ ] Water transparency or animated surface effect using StandardMaterial properties
