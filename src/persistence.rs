@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::{mpsc, Mutex};
 
 use crate::simulation::Cell;
@@ -34,12 +35,35 @@ pub fn save_grid_async(grid: &Grid, tile_size: f32) -> PendingIo {
     PendingIo::Save(Mutex::new(rx))
 }
 
-fn do_save(data: SaveData) -> Result<(), String> {
-    let path = rfd::FileDialog::new()
+/// Asks the user where to save. `rfd` ships no Android backend, so on Android
+/// this reports the gap instead of silently doing nothing.
+#[cfg(not(target_os = "android"))]
+fn pick_save_path() -> Result<Option<PathBuf>, String> {
+    Ok(rfd::FileDialog::new()
         .add_filter("JSON", &["json"])
-        .save_file();
+        .save_file())
+}
 
-    let Some(path) = path else {
+#[cfg(target_os = "android")]
+fn pick_save_path() -> Result<Option<PathBuf>, String> {
+    Err("Saving is not available on Android yet: no file picker is wired up.".into())
+}
+
+/// Asks the user which file to load. See `pick_save_path` for the Android gap.
+#[cfg(not(target_os = "android"))]
+fn pick_load_path() -> Result<Option<PathBuf>, String> {
+    Ok(rfd::FileDialog::new()
+        .add_filter("JSON", &["json"])
+        .pick_file())
+}
+
+#[cfg(target_os = "android")]
+fn pick_load_path() -> Result<Option<PathBuf>, String> {
+    Err("Loading is not available on Android yet: no file picker is wired up.".into())
+}
+
+fn do_save(data: SaveData) -> Result<(), String> {
+    let Some(path) = pick_save_path()? else {
         return Ok(()); // user cancelled
     };
 
@@ -67,11 +91,7 @@ fn do_load(
     current_width: usize,
     current_height: usize,
 ) -> Result<Vec<Cell>, String> {
-    let path = rfd::FileDialog::new()
-        .add_filter("JSON", &["json"])
-        .pick_file();
-
-    let Some(path) = path else {
+    let Some(path) = pick_load_path()? else {
         return Err("Cancelled".into());
     };
 

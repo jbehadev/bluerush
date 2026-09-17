@@ -25,6 +25,23 @@
 - [ ] Star ratings based on time or number of blocks used
 - [ ] Level select screen
 
+## Android Port
+- [ ] **Touch input** — all interaction reads `ButtonInput<MouseButton>`/`KeyCode`
+      (`src/grid.rs:162`, `src/camera.rs:91`); Android emits neither. Needs
+      `Touches`/`TouchInput` handling.
+- [ ] **Camera gestures** — replace middle-drag pan and scroll zoom with
+      two-finger drag and pinch (`src/camera.rs`)
+- [ ] **Gesture disambiguation** — single-finger paint vs. drag-to-pan conflict
+- [ ] **Touchless shortcuts** — undo/redo, Shift line-constraint, debug inspect
+      and Home camera-reset have no toolbar equivalent
+- [ ] **Responsive toolbar** — fixed-pixel left panel (`src/ui.rs`) is oversized
+      on a phone, especially in portrait
+- [ ] **Profile rendering on device** — 1,554 per-tile mesh entities with
+      per-frame material/mesh mutation (`src/render.rs:283`, `:324`, `:374`)
+- [ ] **Save/load on Android** — `rfd` has no Android backend; currently stubbed
+      out in `src/persistence.rs`. Needs SAF or app-private storage.
+- [ ] Add armeabi-v7a/x86_64 ABIs to the APK if wider device support is wanted
+
 ## Architecture / Code Health
 - [ ] Interleave step_objects and step_simulation at high sim speeds instead of batching separately
 - [ ] Remove or integrate unused TextureAssets from textures.rs

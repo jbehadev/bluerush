@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
 use crate::grid::{GameState, GridConfig, InletMode};
 use crate::simulation::{Cell, Grid};
@@ -27,6 +28,43 @@ pub struct CellPlacement {
 #[derive(Resource)]
 pub struct CurrentLevel {
     pub path: PathBuf,
+}
+
+/// Every `levels/*.json` compiled into the binary.
+///
+/// Android packages no working directory we can read, so the level files have
+/// to travel inside the executable. Desktop still reads from disk first, which
+/// keeps `levels/` editable without a rebuild.
+const EMBEDDED_LEVELS: &[(&str, &str)] = &[
+    ("base.json", include_str!("../levels/base.json")),
+    ("coastal-bowl.json", include_str!("../levels/coastal-bowl.json")),
+    ("harbour-canyon.json", include_str!("../levels/harbour-canyon.json")),
+    ("harbour-classic.json", include_str!("../levels/harbour-classic.json")),
+    ("harbour-inlet.json", include_str!("../levels/harbour-inlet.json")),
+    ("harbour-jetty.json", include_str!("../levels/harbour-jetty.json")),
+];
+
+/// Looks up a level's embedded JSON by file name, ignoring its directory.
+fn embedded_level(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    EMBEDDED_LEVELS
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map(|(_, json)| *json)
+}
+
+/// Reads a level's JSON from disk, falling back to the embedded copy.
+fn read_level_source(path: &Path) -> Result<Cow<'static, str>, Box<dyn std::error::Error>> {
+    match std::fs::read_to_string(path) {
+        Ok(json) => Ok(Cow::Owned(json)),
+        Err(fs_err) => match embedded_level(path) {
+            Some(json) => {
+                info!("{:?} not readable ({}); using the embedded copy.", path, fs_err);
+                Ok(Cow::Borrowed(json))
+            }
+            None => Err(Box::new(fs_err)),
+        },
+    }
 }
 
 /// Reads a level JSON file and populates the `Grid`, `GameState`, and `InletMode`.
@@ -58,7 +96,7 @@ fn try_load_level(
     grid: &mut Grid,
     inlet_mode: &mut InletMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let json = std::fs::read_to_string(path)?;
+    let json = read_level_source(path)?;
     let level: LevelData = serde_json::from_str(&json)?;
 
     *grid = Grid::blank(level.width, level.height);

@@ -1,0 +1,44 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.jbehadev.bluerush"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.jbehadev.bluerush"
+        // GameActivity needs 21+; wgpu's Vulkan backend wants a newer base.
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    // The Rust cdylib is placed here by cargo-ndk before the Gradle build runs.
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ["src/main/jniLibs"]
+        }
+    }
+
+    buildTypes {
+        release {
+            // Unsigned by default; CI publishes the debug APK for sideloading.
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Supplies com.google.androidgamesdk.GameActivity, the activity that loads
+    // the Rust cdylib. Must stay in step with the android-activity crate that
+    // Bevy pulls in via its default `android-game-activity` feature.
+    implementation "androidx.games:games-activity:3.0.5"
+    implementation "androidx.appcompat:appcompat:1.7.0"
+}

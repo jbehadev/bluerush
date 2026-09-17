@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.hardware.vulkan.level" android:required="false" />
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+
+    <application
+        android:label="BlueRush"
+        android:allowBackup="true"
+        android:theme="@style/Theme.AppCompat.NoActionBar">
+
+        <activity
+            android:name="com.google.androidgamesdk.GameActivity"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape">
+
+            <!-- Name of the cdylib (libbluerush.so) that GameActivity loads. -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="bluerush" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

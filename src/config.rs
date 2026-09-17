@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_os = "android"))]
 use std::path::Path;
 
 /// Application configuration loaded from `config.yaml` at startup.
@@ -28,11 +29,22 @@ impl Default for AppConfig {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 const CONFIG_PATH: &str = "config.yaml";
 
 impl AppConfig {
     /// Load config from `config.yaml`, falling back to `Default` on any error.
     /// Writes the default file if it does not yet exist.
+    ///
+    /// Android has no writable working directory (the process starts at a
+    /// read-only `/`), so there the built-in defaults are used as-is and no
+    /// file is read or written.
+    #[cfg(target_os = "android")]
+    pub fn load() -> Self {
+        AppConfig::default()
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub fn load() -> Self {
         let path = Path::new(CONFIG_PATH);
         if path.exists() {

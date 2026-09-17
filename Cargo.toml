@@ -3,6 +3,16 @@ name = "BlueRush"
 version = "0.1.0"
 edition = "2024"
 
+# The game lives in a library so the Android build can produce a `cdylib` that
+# the activity loads, while `src/main.rs` stays the desktop entry point.
+[lib]
+name = "bluerush"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "BlueRush"
+path = "src/main.rs"
+
 [dependencies]
 bevy = "0.18"
 bevy_mesh = "0.18"
@@ -11,6 +21,10 @@ rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+
+# Native file dialogs: desktop only. rfd has no Android backend, so it is not
+# a dependency there and the save/load paths are cfg-gated in persistence.rs.
+[target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.15"
 
 # Enable optimizations for dependencies in debug builds (keeps game fast while iterating)

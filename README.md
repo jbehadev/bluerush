@@ -31,6 +31,31 @@ cargo run
 
 > **Note:** The first build will take a while as Bevy and its dependencies compile. Subsequent builds are fast — dependencies are compiled with `opt-level = 3` while your code stays at `opt-level = 0` for quick iteration.
 
+## Building for Android
+
+The game builds as an Android `cdylib` that a GameActivity loads. Requirements:
+the Android SDK, an NDK (r27c is what CI uses), JDK 17, and
+[`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk).
+
+```bash
+rustup target add aarch64-linux-android
+cargo install cargo-ndk
+
+# Compile the Rust library into the Gradle project's jniLibs
+cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build --release --lib
+
+# Package the APK
+cd android && gradle assembleDebug
+```
+
+The APK lands in `android/app/build/outputs/apk/debug/`. CI also builds one on
+every pull request and uploads it as an artifact — see
+`.github/workflows/android.yml`.
+
+> **Status:** the Android build currently compiles, launches, and loads a level.
+> Input is still mouse- and keyboard-driven, so the game is not yet playable by
+> touch. See `TODO.md` for what remains.
+
 ## Running Tests
 
 ```bash
