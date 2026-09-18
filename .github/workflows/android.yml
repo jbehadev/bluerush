@@ -56,9 +56,39 @@ jobs:
             -o android/app/src/main/jniLibs \
             build --release --lib
 
+      # Bevy's default `android_shared_stdcxx` feature links the Rust cdylib
+      # against the shared C++ runtime. That .so lives in the NDK and is not
+      # copied automatically, and without it dlopen fails at launch.
+      - name: Bundle libc++_shared.so
+        run: |
+          SRC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+          if [ ! -f "$SRC" ]; then
+            echo "libc++_shared.so not found at $SRC"; exit 1
+          fi
+          cp "$SRC" android/app/src/main/jniLibs/arm64-v8a/
+          ls -la android/app/src/main/jniLibs/arm64-v8a/
+
+      # Surfaces the two things that make the app die on launch: a missing
+      # shared library, and which libs actually ended up inside the APK.
+      - name: Inspect native libraries
+        run: |
+          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          echo "== libbluerush.so NEEDED entries =="
+          "$READELF" -d android/app/src/main/jniLibs/arm64-v8a/libbluerush.so \
+            | grep NEEDED
+
       - name: Build debug APK
         working-directory: android
         run: gradle --no-daemon assembleDebug
+
+      - name: Verify APK contents
+        run: |
+          echo "== native libs packaged in the APK =="
+          unzip -l android/app/build/outputs/apk/debug/app-debug.apk \
+            | grep -E "\.so$" || true
+          echo "== GameActivity class present? =="
+          unzip -l android/app/build/outputs/apk/debug/app-debug.apk \
+            | grep -E "classes.*\.dex" || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
