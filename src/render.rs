@@ -31,6 +31,17 @@ pub const OBJECT_PALETTE_SIZE: usize = 64;
 /// World-space height of a fully-filled cell cube. Lower cells are scaled down proportionally.
 pub const CUBE_HEIGHT: f32 = 5.0;
 
+/// Illuminance (lux) of the directional "sun" light.
+const SUN_ILLUMINANCE: f32 = 12000.0;
+/// Luminance (cd/m^2) of the global ambient light. Bevy's default of 80 is about 2%
+/// of the luminance a face fully facing `SUN_ILLUMINANCE` receives, so faces turned
+/// away from the sun render near-black. At this value an unlit face sits at roughly
+/// 15% of a fully lit one: shading still reads, but the geometry stays visible.
+const AMBIENT_BRIGHTNESS: f32 = 600.0;
+/// Tint of the ambient light: a pale sky blue matching the `ClearColor` background,
+/// so shadowed faces pick up the colour of the sky rather than neutral grey.
+const AMBIENT_COLOR: Color = Color::srgb(0.75, 0.85, 1.0);
+
 /// Marker component attached to every tile mesh entity, identifying its grid position.
 #[derive(Component)]
 pub struct Tile {
@@ -252,11 +263,18 @@ fn setup_render(
     let width = grid.width;
     let height = grid.height;
 
+    // Ambient fill light so faces angled away from the sun aren't pure black
+    commands.insert_resource(GlobalAmbientLight {
+        color: AMBIENT_COLOR,
+        brightness: AMBIENT_BRIGHTNESS,
+        ..default()
+    });
+
     // Directional light (sun) for shadows and depth
     commands.spawn((
         DirectionalLight {
             shadows_enabled: true,
-            illuminance: 12000.0,
+            illuminance: SUN_ILLUMINANCE,
             ..default()
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.4, 0.0)),
