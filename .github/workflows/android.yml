@@ -11,6 +11,8 @@ jobs:
   apk:
     name: Build APK
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -90,9 +92,32 @@ jobs:
           unzip -l android/app/build/outputs/apk/debug/app-debug.apk \
             | grep -E "classes.*\.dex" || true
 
-      - name: Upload APK
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk BlueRush-debug.apk
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: BlueRush-android-${{ steps.sha.outputs.short }}
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: BlueRush-debug.apk
           if-no-files-found: error
+
+      # Artifact downloads need a signed-in session and arrive zipped, which is
+      # awkward on a phone. A release asset is a plain URL that installs with one
+      # tap. Skipped for pull_request events, where forks get a read-only token.
+      - name: Publish APK to rolling prerelease
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: Android test build
+          prerelease: true
+          body: |
+            Debug APK built from `${{ github.sha }}` on `${{ github.ref_name }}`.
+
+            Unsigned test build for sideloading, not a released version.
+            arm64-v8a only; requires Android 7.0 (API 24) or newer.
+
+            Touch input is not implemented yet: the toolbar responds to taps,
+            but placing blocks, panning and zooming do not.
+          files: BlueRush-debug.apk
