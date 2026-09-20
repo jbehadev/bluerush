@@ -104,9 +104,21 @@ jobs:
           echo "== native libs packaged in the APK =="
           unzip -l android/app/build/outputs/apk/debug/app-debug.apk \
             | grep -E "\.so$" || true
-          echo "== GameActivity class present? =="
-          unzip -l android/app/build/outputs/apk/debug/app-debug.apk \
-            | grep -E "classes.*\.dex" || true
+          # The manifest names com.google.androidgamesdk.GameActivity. If the
+          # aar's classes did not merge into the dex, Android cannot resolve the
+          # activity and kills the app the moment it starts.
+          echo "== GameActivity class in dex? =="
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          for dex in $(unzip -l "$APK" | grep -oE "classes[0-9]*\.dex"); do
+            echo "-- $dex --"
+            unzip -p "$APK" "$dex" | strings \
+              | grep -E "androidgamesdk|gametextinput" | sort -u | head -20
+          done
+          if ! unzip -p "$APK" classes.dex | strings \
+              | grep -q "com/google/androidgamesdk/GameActivity"; then
+            echo "FATAL: GameActivity class missing from classes.dex"
+            exit 1
+          fi
 
       - name: Name the APK
         run: cp android/app/build/outputs/apk/debug/app-debug.apk BlueRush-debug.apk
