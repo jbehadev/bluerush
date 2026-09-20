@@ -110,20 +110,29 @@ jobs:
           echo "== native libs packaged in the APK =="
           unzip -l android/app/build/outputs/apk/debug/app-debug.apk \
             | grep -E "\.so$" || true
-          # The manifest names com.google.androidgamesdk.GameActivity. If the
-          # aar's classes did not merge into the dex, Android cannot resolve the
-          # activity and kills the app the moment it starts.
-          echo "== GameActivity class in dex? =="
+          # Logcat proved the class is absent at runtime:
+          #   ClassNotFoundException: com.google.androidgamesdk.GameActivity
+          # A strings match is not enough, since a mere reference to the name
+          # also matches. Ask dexdump which classes are actually DEFINED.
           APK=android/app/build/outputs/apk/debug/app-debug.apk
-          for dex in $(unzip -l "$APK" | grep -oE "classes[0-9]*\.dex"); do
+          DEXDUMP=$(ls -d "$ANDROID_HOME"/build-tools/*/dexdump 2>/dev/null | tail -1)
+          echo "== classes defined in the apk (androidgamesdk / gametextinput) =="
+          mkdir -p /tmp/apkdex && unzip -o -q "$APK" "classes*.dex" -d /tmp/apkdex
+          for dex in /tmp/apkdex/classes*.dex; do
             echo "-- $dex --"
-            unzip -p "$APK" "$dex" | strings \
-              | grep -E "androidgamesdk|gametextinput" | sort -u | head -20
+            "$DEXDUMP" "$dex" | grep -E "Class descriptor" | sort -u | head -40
           done
-          if ! unzip -p "$APK" classes.dex | strings \
-              | grep -q "com/google/androidgamesdk/GameActivity"; then
-            echo "FATAL: GameActivity class missing from classes.dex"
-            exit 1
+
+          echo "== what the resolved games-activity aar actually contains =="
+          AAR=$(find ~/.gradle/caches -name "games-activity-*.aar" | head -1)
+          echo "aar: $AAR"
+          if [ -n "$AAR" ]; then
+            unzip -l "$AAR"
+            mkdir -p /tmp/aar && unzip -o -q "$AAR" -d /tmp/aar
+            for jar in $(find /tmp/aar -name "*.jar"); do
+              echo "-- $jar --"
+              unzip -l "$jar" | head -40
+            done
           fi
 
       # Static checks cannot tell us why the app dies on a real device, so run
