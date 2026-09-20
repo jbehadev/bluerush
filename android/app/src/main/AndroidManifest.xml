@@ -7,17 +7,17 @@
     <application
         android:label="BlueRush"
         android:allowBackup="true"
-        android:hasCode="true"
+        android:hasCode="false"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
         <activity
-            android:name="com.google.androidgamesdk.GameActivity"
+            android:name="android.app.NativeActivity"
             android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
             android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape">
 
-            <!-- Name of the cdylib (libbluerush.so) that GameActivity loads. -->
+            <!-- Name of the cdylib (libbluerush.so) that NativeActivity loads. -->
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="bluerush" />

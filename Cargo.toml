@@ -14,7 +14,6 @@ name = "BlueRush"
 path = "src/main.rs"
 
 [dependencies]
-bevy = "0.18"
 bevy_mesh = "0.18"
 bevy_asset = "0.18"
 rand = "0.8"
@@ -26,6 +25,39 @@ serde_yaml = "0.9"
 # a dependency there and the save/load paths are cfg-gated in persistence.rs.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.15"
+bevy = "0.18"
+
+# Android uses NativeActivity rather than Bevy's default GameActivity backend.
+# GameActivity needs its Java class from the androidx.games aar, and that class
+# could not be loaded at runtime (ClassNotFoundException) even once it was
+# provably present in the dex. android.app.NativeActivity is part of the
+# framework, so it always resolves and the apk needs no Java code at all.
+#
+# Selecting it means opting out of bevy's `default_platform` feature, which
+# hardcodes android-game-activity. The list below is `default_platform` minus
+# android-game-activity and the Linux window backends, plus the features the
+# default `2d`/`3d`/`ui` meta-features pull in by way of default_platform.
+[target.'cfg(target_os = "android")'.dependencies.bevy]
+version = "0.18"
+default-features = false
+features = [
+    "std",
+    "android-native-activity",
+    "android_shared_stdcxx",
+    "bevy_gilrs",
+    "bevy_winit",
+    "default_font",
+    "multi_threaded",
+    "sysinfo_plugin",
+    "default_app",
+    "2d_bevy_render",
+    "3d_bevy_render",
+    "ui_api",
+    "ui_bevy_render",
+    "scene",
+    "audio",
+    "picking",
+]
 
 # Enable optimizations for dependencies in debug builds (keeps game fast while iterating)
 [profile.dev.package."*"]

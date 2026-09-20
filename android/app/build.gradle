@@ -36,20 +36,6 @@ android {
 }
 
 dependencies {
-    // Supplies com.google.androidgamesdk.GameActivity, the activity that loads
-    // the Rust cdylib.
-    //
-    // The version is NOT free to bump. android-activity (pulled in by Bevy's
-    // default `android-game-activity` feature) vendors GameActivity's C++ and
-    // registers its JNI methods against this exact Java class; GameActivity.h
-    // in android-activity 0.6.0 declares 2.0.2. A mismatched .aar makes
-    // RegisterNatives fail and the native code LOG_FATALs, which shows up as
-    // the app opening fullscreen and immediately closing. Check
-    // GAMEACTIVITY_{MAJOR,MINOR,BUGFIX}_VERSION in the android-activity source
-    // before changing this.
-    //
-    // Deliberately the only dependency: GameActivity extends android.app.Activity,
-    // so appcompat is not needed, and pulling it in produced duplicate Kotlin
-    // stdlib classes.
-    implementation "androidx.games:games-activity:2.0.2"
+    // Intentionally empty. NativeActivity ships with the framework, so the apk
+    // needs no Java code and no androidx.games aar.
 }

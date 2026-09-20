@@ -110,43 +110,12 @@ jobs:
           echo "== native libs packaged in the APK =="
           unzip -l android/app/build/outputs/apk/debug/app-debug.apk \
             | grep -E "\.so$" || true
-          # Logcat proved the class is absent at runtime:
-          #   ClassNotFoundException: com.google.androidgamesdk.GameActivity
-          # A strings match is not enough, since a mere reference to the name
-          # also matches. Ask dexdump which classes are actually DEFINED.
-          APK=android/app/build/outputs/apk/debug/app-debug.apk
-          DEXDUMP=$(ls -d "$ANDROID_HOME"/build-tools/*/dexdump 2>/dev/null | tail -1)
-          echo "== classes defined in the apk (androidgamesdk / gametextinput) =="
-          mkdir -p /tmp/apkdex && unzip -o -q "$APK" "classes*.dex" -d /tmp/apkdex
-          for dex in /tmp/apkdex/classes*.dex; do
-            echo "-- $dex --"
-            "$DEXDUMP" "$dex" | grep -E "Class descriptor" | sort -u | head -40
-          done
-
-          # GameActivity is present in the dex yet ART raises
-          # ClassNotFoundException for it, which is what happens when the
-          # application is marked hasCode="false": the framework never builds
-          # a class loader over the apk's dex. This module has no Java sources
-          # of its own, so check what the merger actually produced.
-          echo "== hasCode in the merged manifest =="
+          # NativeActivity comes from the framework, so the apk needs no Java
+          # classes at all. Confirm nothing is expecting a bundled activity.
+          echo "== activity + lib_name in the merged manifest =="
           MM=$(find android/app/build/intermediates -name AndroidManifest.xml -path "*merged_manifest*" | head -1)
-          echo "merged manifest: $MM"
-          [ -n "$MM" ] && grep -oE 'hasCode="[a-z]+"' "$MM" || echo "hasCode not stated"
+          grep -oE 'android:name="[^"]*Activity"|android:value="bluerush"|hasCode="[a-z]+"' "$MM" || true
 
-          echo "== what the resolved games-activity aar actually contains =="
-          AAR=$(find ~/.gradle/caches -name "games-activity-*.aar" | head -1)
-          echo "aar: $AAR"
-          if [ -n "$AAR" ]; then
-            unzip -l "$AAR"
-            mkdir -p /tmp/aar && unzip -o -q "$AAR" -d /tmp/aar
-            for jar in $(find /tmp/aar -name "*.jar"); do
-              echo "-- $jar --"
-              unzip -l "$jar" | head -40
-            done
-          fi
-
-      # Static checks cannot tell us why the app dies on a real device, so run
-      # the actual APK on an emulator and capture the crash from logcat.
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -166,7 +135,7 @@ jobs:
           script: |
             adb install -r android/app/build/outputs/apk/debug/app-debug.apk
             adb logcat -c
-            adb shell am start -n com.jbehadev.bluerush/com.google.androidgamesdk.GameActivity
+            adb shell am start -n com.jbehadev.bluerush/android.app.NativeActivity
             sleep 25
             echo "===== IS THE PROCESS ALIVE? ====="
             adb shell pidof com.jbehadev.bluerush || echo "PROCESS IS NOT RUNNING"
@@ -174,7 +143,7 @@ jobs:
             echo "===== CRASH / FATAL ====="
             grep -iE "FATAL|AndroidRuntime|beginning of crash|backtrace|signal |tombstone|libc " /tmp/logcat.txt | head -80
             echo "===== APP + RUST OUTPUT ====="
-            grep -iE "bluerush|RustStdoutStderr|panic|GameActivity|gametextinput|wgpu|vulkan|winit|bevy" /tmp/logcat.txt | head -150
+            grep -iE "bluerush|RustStdoutStderr|panic|NativeActivity|wgpu|vulkan|winit|bevy|GraphicsEnv" /tmp/logcat.txt | head -150
             echo "===== ACTIVITY MANAGER ====="
             grep -iE "ActivityManager|ActivityTaskManager" /tmp/logcat.txt | head -40
 
