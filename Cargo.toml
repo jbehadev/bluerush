@@ -14,6 +14,12 @@ name = "BlueRush"
 path = "src/main.rs"
 
 [dependencies]
+# bevy must be declared here, not only in the target-specific sections below.
+# Bevy's derive macros resolve their own crate path by looking for `bevy` in
+# [dependencies]/[dev-dependencies] only (bevy_macro_utils::BevyManifest), and
+# with it absent every #[derive(Component)]/#[derive(Resource)] silently stops
+# generating its impl. No features are enabled here; each target adds its own.
+bevy = { version = "0.18", default-features = false }
 bevy_mesh = "0.18"
 bevy_asset = "0.18"
 rand = "0.8"
@@ -25,7 +31,8 @@ serde_yaml = "0.9"
 # a dependency there and the save/load paths are cfg-gated in persistence.rs.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.15"
-bevy = "0.18"
+# Bevy's normal default features.
+bevy = { version = "0.18", default-features = false, features = ["2d", "3d", "ui"] }
 
 # Android uses NativeActivity rather than Bevy's default GameActivity backend.
 # GameActivity needs its Java class from the androidx.games aar, and that class
