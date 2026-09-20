@@ -52,9 +52,11 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      - name: Build Rust cdylib (arm64)
+      # x86_64 is built alongside arm64 purely so the smoke test below can
+      # run the real APK on an emulator; phones use the arm64 slice.
+      - name: Build Rust cdylib (arm64 + x86_64)
         run: |
-          cargo ndk -t arm64-v8a \
+          cargo ndk -t arm64-v8a -t x86_64 \
             -o android/app/src/main/jniLibs \
             build --release --lib
 
@@ -63,12 +65,16 @@ jobs:
       # copied automatically, and without it dlopen fails at launch.
       - name: Bundle libc++_shared.so
         run: |
-          SRC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
-          if [ ! -f "$SRC" ]; then
-            echo "libc++_shared.so not found at $SRC"; exit 1
-          fi
-          cp "$SRC" android/app/src/main/jniLibs/arm64-v8a/
-          ls -la android/app/src/main/jniLibs/arm64-v8a/
+          SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
+          for pair in "arm64-v8a:aarch64-linux-android" "x86_64:x86_64-linux-android"; do
+            abi="${pair%%:*}"; triple="${pair##*:}"
+            SRC="$SYSROOT/$triple/libc++_shared.so"
+            if [ ! -f "$SRC" ]; then
+              echo "libc++_shared.so not found at $SRC"; exit 1
+            fi
+            cp "$SRC" "android/app/src/main/jniLibs/$abi/"
+          done
+          ls -la android/app/src/main/jniLibs/*/
 
       # Surfaces the two things that make the app die on launch: a missing
       # shared library, and which libs actually ended up inside the APK.
@@ -119,6 +125,41 @@ jobs:
             echo "FATAL: GameActivity class missing from classes.dex"
             exit 1
           fi
+
+      # Static checks cannot tell us why the app dies on a real device, so run
+      # the actual APK on an emulator and capture the crash from logcat.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Smoke test on emulator
+        id: smoke
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            set -x
+            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+            adb logcat -c
+            adb shell am start -n com.jbehadev.bluerush/com.google.androidgamesdk.GameActivity
+            sleep 20
+            echo "===== IS THE PROCESS ALIVE? ====="
+            adb shell pidof com.jbehadev.bluerush || echo "PROCESS IS NOT RUNNING"
+            echo "===== CRASH / FATAL ====="
+            adb logcat -d -v brief \
+              | grep -iE "FATAL|AndroidRuntime|DEBUG   |backtrace|signal |tombstone" \
+              | head -60
+            echo "===== APP + RUST OUTPUT ====="
+            adb logcat -d -v brief \
+              | grep -iE "bluerush|RustStdoutStderr|panic|GameActivity|gametextinput|wgpu|vulkan|winit|bevy" \
+              | head -120
 
       - name: Name the APK
         run: cp android/app/build/outputs/apk/debug/app-debug.apk BlueRush-debug.apk
