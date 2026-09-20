@@ -123,6 +123,16 @@ jobs:
             "$DEXDUMP" "$dex" | grep -E "Class descriptor" | sort -u | head -40
           done
 
+          # GameActivity is present in the dex yet ART raises
+          # ClassNotFoundException for it, which is what happens when the
+          # application is marked hasCode="false": the framework never builds
+          # a class loader over the apk's dex. This module has no Java sources
+          # of its own, so check what the merger actually produced.
+          echo "== hasCode in the merged manifest =="
+          MM=$(find android/app/build/intermediates -name AndroidManifest.xml -path "*merged_manifest*" | head -1)
+          echo "merged manifest: $MM"
+          [ -n "$MM" ] && grep -oE 'hasCode="[a-z]+"' "$MM" || echo "hasCode not stated"
+
           echo "== what the resolved games-activity aar actually contains =="
           AAR=$(find ~/.gradle/caches -name "games-activity-*.aar" | head -1)
           echo "aar: $AAR"
