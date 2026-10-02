@@ -1,0 +1,18 @@
+name: Valley
+heightmap: valley.png
+height_scale: 160.0
+source:
+  x: 0.5873528
+  z: 0.026845638
+  radius: 5
+  rate: 110.0
+objects:
+- x: 0.7147651
+  z: 0.5033557
+  weight: 4000.0
+- x: 0.31400797
+  z: 0.33557048
+  weight: 150.0
+- x: 0.314008
+  z: 0.67114097
+  weight: 800.0
