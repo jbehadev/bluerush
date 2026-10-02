@@ -63,6 +63,8 @@ const PANEL_WIDTH: f32 = 120.0; // left toolbar width (world clicks under it are
 const WEIGHTS: [f32; 5] = [200.0, 500.0, 1000.0, 2000.0, 5000.0]; // selectable object weights
 const SINE_FREQ: f32 = 1.2; // rad/sec for the Sine wave pattern
 const RANDOM_INTERVAL: f32 = 0.6; // seconds between re-rolls for the Random wave pattern
+const SURGE_SECS: f32 = 3.0; // how long the FLOOD! button's surge lasts
+const SURGE_MULT: f32 = 8.0; // extra source output (× SOURCE rate) during a surge
 const FLOW_RATE: f32 = 0.5; // fraction of the surface gap equalised per iteration
 const FLOW_ITERS: usize = 8; // flow iterations per frame (faster spreading = no spike)
 const DT: f32 = 1.0 / 60.0;
@@ -261,6 +263,13 @@ struct Wave {
     since_roll: f32, // seconds since the last Random re-roll
 }
 
+/// A one-shot flood surge: while `remaining` > 0 the source pours out
+/// `SURGE_MULT` × extra on top of the wave pattern. Set by the FLOOD! button / F key.
+#[derive(Resource, Default)]
+struct Surge {
+    remaining: f32, // seconds left in the current surge
+}
+
 /// Orbit camera state: a spherical position around a focus point on the ground.
 #[derive(Resource)]
 struct OrbitCamera {
@@ -278,6 +287,8 @@ struct PourButton;
 struct EraseButton;
 #[derive(Component)]
 struct WaveButton(WavePattern);
+#[derive(Component)]
+struct FloodButton;
 /// The collapsed dropdown button showing the current level's name.
 #[derive(Component)]
 struct LevelDropdownButton;
@@ -438,6 +449,7 @@ impl Plugin for FloodPlugin {
             .insert_resource(SelectedTool::Object(500.0))
             .insert_resource(Wave { pattern: WavePattern::Flood, rng_level: 1.0, since_roll: 0.0 })
             .insert_resource(Paused(false))
+            .insert_resource(Surge::default())
             .insert_resource(PendingLevel::default())
             // setup builds the LevelLibrary that setup_ui's dropdown lists.
             .add_systems(Startup, (setup, setup_ui).chain())
@@ -449,6 +461,8 @@ impl Plugin for FloodPlugin {
                     handle_pour_button,
                     handle_erase_button,
                     handle_wave_buttons,
+                    handle_flood_button,
+                    update_flood_button,
                     handle_level_dropdown,
                     handle_level_option,
                     update_tool_highlight,
@@ -948,8 +962,31 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                     });
             }
 
+            // One-shot surge: a short burst of extra water from the source.
+            panel
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(30.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        margin: UiRect::top(Val::Px(6.0)),
+                        ..default()
+                    },
+                    BackgroundColor(FLOOD_IDLE),
+                    FloodButton,
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        Text::new("FLOOD!"),
+                        TextFont { font_size: 12.0, ..default() },
+                        TextColor(Color::WHITE),
+                    ));
+                });
+
             panel.spawn((
-                Text::new("[Space] pause\n[R] drain"),
+                Text::new("[Space] pause\n[R] drain\n[F] flood"),
                 TextFont { font_size: 11.0, ..default() },
                 TextColor(Color::srgb(0.65, 0.66, 0.72)),
                 Node { margin: UiRect::top(Val::Px(8.0)), ..default() },
@@ -1037,6 +1074,32 @@ fn handle_wave_buttons(
         if *interaction == Interaction::Pressed {
             wave.pattern = b.0;
         }
+    }
+}
+
+const FLOOD_IDLE: Color = Color::srgb(0.15, 0.30, 0.65);
+const FLOOD_ACTIVE: Color = Color::srgb(0.30, 0.65, 1.00);
+
+/// The FLOOD! button (or F) starts a surge. Pressing again mid-surge restarts
+/// the timer rather than stacking.
+fn handle_flood_button(
+    q: Query<&Interaction, (Changed<Interaction>, With<FloodButton>)>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut surge: ResMut<Surge>,
+) {
+    let clicked = q.iter().any(|i| *i == Interaction::Pressed);
+    if clicked || keys.just_pressed(KeyCode::KeyF) {
+        surge.remaining = SURGE_SECS;
+    }
+}
+
+/// Light the FLOOD! button up while a surge is running.
+fn update_flood_button(surge: Res<Surge>, mut q: Query<&mut BackgroundColor, With<FloodButton>>) {
+    if !surge.is_changed() {
+        return;
+    }
+    for mut bg in &mut q {
+        *bg = BackgroundColor(if surge.remaining > 0.0 { FLOOD_ACTIVE } else { FLOOD_IDLE });
     }
 }
 
@@ -1340,12 +1403,13 @@ fn run_source(
     paused: Res<Paused>,
     source: Res<Source>,
     mut wave: ResMut<Wave>,
+    mut surge: ResMut<Surge>,
     mut water: ResMut<Water>,
 ) {
     if paused.0 {
         return;
     }
-    let mult = match wave.pattern {
+    let mut mult = match wave.pattern {
         WavePattern::Flood => 1.0,
         WavePattern::Sine => (0.5 + 0.5 * (time.elapsed_secs() * SINE_FREQ).sin()).max(0.0),
         WavePattern::Random => {
@@ -1357,6 +1421,12 @@ fn run_source(
             wave.rng_level
         }
     };
+    // Only touch `surge` when a surge is running, so its change detection
+    // (which drives the button colour) fires just on start and end.
+    if surge.remaining > 0.0 {
+        mult += SURGE_MULT;
+        surge.remaining = (surge.remaining - DT).max(0.0);
+    }
     add_water(&mut water, source.x, source.z, source.radius, source.rate * mult * DT, -0.8);
 }
 
