@@ -64,7 +64,7 @@ const WEIGHTS: [f32; 5] = [200.0, 500.0, 1000.0, 2000.0, 5000.0]; // selectable 
 const SINE_FREQ: f32 = 1.2; // rad/sec for the Sine wave pattern
 const RANDOM_INTERVAL: f32 = 0.6; // seconds between re-rolls for the Random wave pattern
 const SURGE_SECS: f32 = 3.0; // how long the FLOOD! button's surge lasts
-const SURGE_MULT: f32 = 8.0; // extra source output (× SOURCE rate) during a surge
+const SURGE_MULT: f32 = 5.0; // extra source output (× SOURCE rate) during a surge
 const FLOW_RATE: f32 = 0.5; // fraction of the surface gap equalised per iteration
 const FLOW_ITERS: usize = 8; // flow iterations per frame (faster spreading = no spike)
 const DT: f32 = 1.0 / 60.0;
