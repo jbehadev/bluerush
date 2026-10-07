@@ -1773,6 +1773,97 @@ mod tests {
         );
     }
 
+    /// Regenerate the cliff levels (waterfall, cascades):
+    ///   cargo test generate_cliff_levels -- --ignored
+    /// A cliff is just a hard edge in the heightmap — one cell high, the next
+    /// one far lower. The weir flux in `step_flow` spills the water over the
+    /// lip, and the water mesh stretches from the lip down to the pool below,
+    /// which draws the falling sheet for free.
+    #[test]
+    #[ignore]
+    fn generate_cliff_levels() {
+        let mid = (W - 1) as f32 * 0.5;
+        let dmax = (D - 1) as f32;
+        // Smooth 0→1 ramp, used to blend channels and pools into the ground.
+        let smooth = |t: f32| {
+            let t = t.clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+
+        // --- Waterfall: a river crosses a high plateau and pours off a ~60 wu
+        // cliff into a plunge pool, then winds down a lower valley to the drain.
+        let cliff_z = 0.42 * dmax; // last row of the plateau (the lip)
+        let pool_z = cliff_z + 11.0; // centre of the plunge pool
+        let upper_c = move |z: f32| mid + 18.0 * (PI * z / cliff_z).sin();
+        let lower_c = move |z: f32| mid + 22.0 * (1.5 * PI * (z - cliff_z) / (dmax - cliff_z)).sin();
+        let waterfall = |x: usize, z: usize| {
+            let (xf, zf) = (x as f32, z as f32);
+            let h = if zf <= cliff_z {
+                // Plateau: gentle tilt toward the lip, river cut into high banks.
+                let base = 95.0 + 12.0 * (1.0 - zf / cliff_z);
+                let over = ((xf - upper_c(zf)).abs() - 7.0).max(0.0);
+                base + (over * over * 0.05).min(30.0)
+            } else {
+                // Lower valley: starts ~60 below the lip and slopes to the drain.
+                let base = 35.0 * (1.0 - (zf - cliff_z) / (dmax - cliff_z));
+                let over = ((xf - lower_c(zf)).abs() - 9.0).max(0.0);
+                let bank = (over * over * 0.04).min(35.0);
+                // Plunge pool: a bowl at the cliff foot; banks fade out inside it.
+                let r = ((xf - mid).powi(2) + (zf - pool_z).powi(2)).sqrt();
+                let pool = 1.0 - smooth(r / 16.0);
+                base + bank * (1.0 - pool) - 18.0 * pool
+            };
+            h.max(0.0) + edge_rim(x, z)
+        };
+        bake(
+            "levels/waterfall.yaml",
+            "Waterfall",
+            &waterfall,
+            SourceConfig { x: fx(upper_c(4.0)), z: fz(4.0), radius: 5, rate: 120.0 },
+            vec![
+                ObjectConfig { x: fx(upper_c(0.20 * dmax)), z: 0.20, weight: 150.0 },
+                ObjectConfig { x: fx(upper_c(0.34 * dmax)), z: 0.34, weight: 300.0 },
+                ObjectConfig { x: fx(lower_c(0.80 * dmax)), z: 0.80, weight: 2500.0 },
+            ],
+        );
+
+        // --- Cascades: four terraces stepping down ~25 wu each. Every lip has
+        // a notch on alternating sides, so the stream zig-zags across the map,
+        // dropping into a small pool at the foot of each fall.
+        let edges = [0.0, 0.28 * dmax, 0.50 * dmax, 0.72 * dmax, dmax]; // terrace boundaries (rows)
+        let bases = [100.0, 72.0, 44.0, 16.0]; // height at each terrace's lip
+        let xs = [0.5, 0.33, 0.67, 0.33, 0.5].map(|f| f * (W - 1) as f32); // stream x at each boundary
+        let cascades = |x: usize, z: usize| {
+            let (xf, zf) = (x as f32, z as f32);
+            let k = (0..4).rev().find(|&k| zf >= edges[k]).unwrap_or(0);
+            let t = (zf - edges[k]) / (edges[k + 1] - edges[k]); // 0 at the foot, 1 at the lip
+            let base = bases[k] + 5.0 * (1.0 - t); // slight tilt toward the lip
+            // Channel bends from where the last fall landed over to this lip's notch.
+            let c = xs[k] + (xs[k + 1] - xs[k]) * smooth(t);
+            let over = ((xf - c).abs() - 6.0).max(0.0);
+            let bank = (over * over * 0.05).min(22.0);
+            // Small plunge pool just below each fall (not on the top terrace).
+            let pool = if k > 0 {
+                let r = ((xf - xs[k]).powi(2) + (zf - edges[k] - 5.0).powi(2)).sqrt();
+                1.0 - smooth(r / 9.0)
+            } else {
+                0.0
+            };
+            (base + bank * (1.0 - pool) - 8.0 * pool).max(0.0) + edge_rim(x, z)
+        };
+        bake(
+            "levels/cascades.yaml",
+            "Cascades",
+            &cascades,
+            SourceConfig { x: fx(xs[0]), z: fz(4.0), radius: 5, rate: 120.0 },
+            vec![
+                ObjectConfig { x: fx(xs[1]), z: 0.24, weight: 150.0 },
+                ObjectConfig { x: fx(xs[2]), z: 0.47, weight: 300.0 },
+                ObjectConfig { x: fx(xs[3]), z: 0.69, weight: 2000.0 },
+            ],
+        );
+    }
+
     /// The built-in valley round-trips through the level template format: the
     /// heights baked to PNG come back (within 16-bit quantisation) on load.
     #[test]
