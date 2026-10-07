@@ -426,6 +426,11 @@ Branch commits: `31b6831` look → `6b853e4` flooding+objects → `0d05b25` coll
 `9f7c14f` main-app integration+UI+camera+pause → `b6579e3` erase+docs → (this) gradients.
 Not yet pushed; old 2D code preserved on `main`.
 
+**Wave Off (session 5, `feat/wave-off`)** — added `WavePattern::Off` (source inflow shut off; FLOOD!
+surge still works) as a fourth WAVE panel button, plus the `W` key cycling Flood → Sine → Random → Off.
+Learned: adding an enum variant makes the compiler flag every non-exhaustive `match`; small
+`impl` methods on enums (`next()`) keep cycle logic testable.
+
 ## What Comes Next
 - **Crest-edge polish (optional)** — the upstream overtopping sheet sticks out ~1 cell past the
   block back; needs finer geometry near obstacles if it ever bothers us.

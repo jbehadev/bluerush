@@ -254,6 +254,19 @@ enum WavePattern {
     Flood,  // steady
     Sine,   // smoothly pulsing
     Random, // gusty
+    Off,    // source shut off (a FLOOD! surge still works)
+}
+
+impl WavePattern {
+    /// The next pattern in the W-key cycle.
+    fn next(self) -> Self {
+        match self {
+            WavePattern::Flood => WavePattern::Sine,
+            WavePattern::Sine => WavePattern::Random,
+            WavePattern::Random => WavePattern::Off,
+            WavePattern::Off => WavePattern::Flood,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -943,6 +956,7 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                 (WavePattern::Flood, "Flood"),
                 (WavePattern::Sine, "Sine"),
                 (WavePattern::Random, "Random"),
+                (WavePattern::Off, "Off"),
             ] {
                 panel
                     .spawn((
@@ -1070,14 +1084,20 @@ fn handle_erase_button(
     }
 }
 
+/// Pick a wave pattern from the panel, or press W to cycle
+/// Flood → Sine → Random → Off.
 fn handle_wave_buttons(
     q: Query<(&Interaction, &WaveButton), Changed<Interaction>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut wave: ResMut<Wave>,
 ) {
     for (interaction, b) in &q {
         if *interaction == Interaction::Pressed {
             wave.pattern = b.0;
         }
+    }
+    if keys.just_pressed(KeyCode::KeyW) {
+        wave.pattern = wave.pattern.next();
     }
 }
 
@@ -1436,6 +1456,7 @@ fn run_source(
             }
             wave.rng_level
         }
+        WavePattern::Off => 0.0,
     };
     // Only touch `surge` when a surge is running, so its change detection
     // (which drives the button colour) fires just on start and end.
@@ -1443,7 +1464,9 @@ fn run_source(
         mult += SURGE_MULT;
         surge.remaining = (surge.remaining - DT).max(0.0);
     }
-    add_water(&mut water, source.x, source.z, source.radius, source.rate * mult * DT, -0.8);
+    if mult > 0.0 {
+        add_water(&mut water, source.x, source.z, source.radius, source.rate * mult * DT, -0.8);
+    }
 }
 
 /// Press R to drain all the water (the source then refills it from empty).
@@ -1720,6 +1743,18 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    #[test]
+    fn wave_cycle_visits_every_pattern_including_off() {
+        let mut p = WavePattern::Flood;
+        let mut seen = vec![p];
+        for _ in 0..3 {
+            p = p.next();
+            seen.push(p);
+        }
+        assert!(seen == [WavePattern::Flood, WavePattern::Sine, WavePattern::Random, WavePattern::Off]);
+        assert!(p.next() == WavePattern::Flood);
+    }
 
     /// Regenerate the shipped valley level files from the procedural terrain:
     ///   cargo test generate_valley_level -- --ignored
