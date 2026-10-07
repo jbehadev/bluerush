@@ -62,6 +62,9 @@ Water enters at the top of the channel every frame. The **wave pattern** (a
 | **Flood**  | steady inflow |
 | **Sine**   | smoothly pulsing — `0.5 + 0.5·sin(t · SINE_FREQ)` |
 | **Random** | gusty — a new random multiplier every `RANDOM_INTERVAL` seconds |
+| **Off**    | no inflow — the source is shut off (a FLOOD! surge still pours) |
+
+Click a pattern in the panel, or press **W** to cycle Flood → Sine → Random → Off.
 
 `add_water` deposits depth into a small patch and nudges the ripple field so the
 inflow looks alive. Base rate is `SOURCE_RATE`.
@@ -167,7 +170,7 @@ per-vertex colour lerps **light brown (low streambed) → green (high banks)** o
 | `R` | drain all water |
 
 Left panel: **OBJECTS** weight buttons (200–5000 kg), **Pour Water**, **Erase**,
-and **WAVE** patterns (Flood / Sine / Random). The cursor shows a placement
+and **WAVE** patterns (Flood / Sine / Random / Off). The cursor shows a placement
 preview — a wireframe box sized to the selected weight, or a marker for
 pour/erase (`draw_placement_cursor`).
 
