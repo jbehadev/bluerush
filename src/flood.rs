@@ -614,9 +614,10 @@ fn object_collision(paused: Res<Paused>, mut q: Query<(Entity, &mut FloatObject)
 
 /// Apply the selected tool at the cursor with the left mouse button: pour water
 /// (while held) or drop one object of the chosen weight (on press). Clicks over
-/// the left toolbar are ignored.
+/// the left toolbar, or while a camera modifier is held, are ignored.
 fn handle_click(
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     tool: Res<SelectedTool>,
@@ -627,6 +628,9 @@ fn handle_click(
     objects: Query<(Entity, &FloatObject)>,
     mut commands: Commands,
 ) {
+    if camera_modifier_held(&keys) {
+        return; // left-drag is steering the camera
+    }
     let Ok(window) = windows.single() else { return };
     let Some(cursor) = window.cursor_position() else { return };
     if cursor.x < PANEL_WIDTH {
@@ -1159,21 +1163,33 @@ fn object_physics(
     }
 }
 
-/// Orbit / pan / zoom the camera. Right-drag orbits, middle-drag pans across the
-/// ground, the scroll wheel zooms. Left-drag is reserved for placing/pouring.
+/// True while a camera modifier (Option/Alt or Shift) is held. Left-drag then
+/// steers the camera instead of placing/pouring — needed on a Magic Mouse,
+/// which has no middle button and an unreliable right-drag.
+fn camera_modifier_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight, KeyCode::ShiftLeft, KeyCode::ShiftRight])
+}
+
+/// Orbit / pan / zoom the camera. Right-drag or Option+left-drag orbits;
+/// middle-drag or Shift+left-drag pans across the ground; the scroll wheel
+/// zooms. Plain left-drag is reserved for placing/pouring.
 fn camera_controls(
     buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     mut orbit: ResMut<OrbitCamera>,
     mut cam: Query<&mut Transform, With<Camera3d>>,
 ) {
     let d = motion.delta;
-    if buttons.pressed(MouseButton::Right) {
+    let left = buttons.pressed(MouseButton::Left);
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if buttons.pressed(MouseButton::Right) || (left && alt) {
         orbit.yaw -= d.x * 0.005;
         orbit.pitch = (orbit.pitch - d.y * 0.005).clamp(0.15, 1.5);
     }
-    if buttons.pressed(MouseButton::Middle) {
+    if buttons.pressed(MouseButton::Middle) || (left && shift && !alt) {
         let pan = orbit.distance * 0.0015;
         let right = Vec3::new(orbit.yaw.cos(), 0.0, -orbit.yaw.sin());
         let fwd = Vec3::new(-orbit.yaw.sin(), 0.0, -orbit.yaw.cos());
