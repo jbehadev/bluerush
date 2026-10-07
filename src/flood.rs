@@ -63,6 +63,8 @@ const PANEL_WIDTH: f32 = 120.0; // left toolbar width (world clicks under it are
 const WEIGHTS: [f32; 5] = [200.0, 500.0, 1000.0, 2000.0, 5000.0]; // selectable object weights
 const SINE_FREQ: f32 = 1.2; // rad/sec for the Sine wave pattern
 const RANDOM_INTERVAL: f32 = 0.6; // seconds between re-rolls for the Random wave pattern
+const SURGE_SECS: f32 = 3.0; // how long the FLOOD! button's surge lasts
+const SURGE_MULT: f32 = 5.0; // extra source output (× SOURCE rate) during a surge
 const FLOW_RATE: f32 = 0.5; // fraction of the surface gap equalised per iteration
 const FLOW_ITERS: usize = 8; // flow iterations per frame (faster spreading = no spike)
 const DT: f32 = 1.0 / 60.0;
@@ -261,6 +263,13 @@ struct Wave {
     since_roll: f32, // seconds since the last Random re-roll
 }
 
+/// A one-shot flood surge: while `remaining` > 0 the source pours out
+/// `SURGE_MULT` × extra on top of the wave pattern. Set by the FLOOD! button / F key.
+#[derive(Resource, Default)]
+struct Surge {
+    remaining: f32, // seconds left in the current surge
+}
+
 /// Orbit camera state: a spherical position around a focus point on the ground.
 #[derive(Resource)]
 struct OrbitCamera {
@@ -278,6 +287,8 @@ struct PourButton;
 struct EraseButton;
 #[derive(Component)]
 struct WaveButton(WavePattern);
+#[derive(Component)]
+struct FloodButton;
 /// The collapsed dropdown button showing the current level's name.
 #[derive(Component)]
 struct LevelDropdownButton;
@@ -438,6 +449,7 @@ impl Plugin for FloodPlugin {
             .insert_resource(SelectedTool::Object(500.0))
             .insert_resource(Wave { pattern: WavePattern::Flood, rng_level: 1.0, since_roll: 0.0 })
             .insert_resource(Paused(false))
+            .insert_resource(Surge::default())
             .insert_resource(PendingLevel::default())
             // setup builds the LevelLibrary that setup_ui's dropdown lists.
             .add_systems(Startup, (setup, setup_ui).chain())
@@ -449,6 +461,8 @@ impl Plugin for FloodPlugin {
                     handle_pour_button,
                     handle_erase_button,
                     handle_wave_buttons,
+                    handle_flood_button,
+                    update_flood_button,
                     handle_level_dropdown,
                     handle_level_option,
                     update_tool_highlight,
@@ -677,9 +691,10 @@ fn object_collision(paused: Res<Paused>, mut q: Query<(Entity, &mut FloatObject)
 
 /// Apply the selected tool at the cursor with the left mouse button: pour water
 /// (while held) or drop one object of the chosen weight (on press). Clicks over
-/// the left toolbar are ignored.
+/// the left toolbar, or while a camera modifier is held, are ignored.
 fn handle_click(
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     tool: Res<SelectedTool>,
@@ -690,6 +705,9 @@ fn handle_click(
     objects: Query<(Entity, &FloatObject)>,
     mut commands: Commands,
 ) {
+    if camera_modifier_held(&keys) {
+        return; // left-drag is steering the camera
+    }
     let Ok(window) = windows.single() else { return };
     let Ok((camera, cam_t)) = cameras.single() else { return };
     let Some(hit) = cursor_hit(window, camera, cam_t, &terrain.0, &water) else { return };
@@ -948,8 +966,31 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                     });
             }
 
+            // One-shot surge: a short burst of extra water from the source.
+            panel
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(30.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        margin: UiRect::top(Val::Px(6.0)),
+                        ..default()
+                    },
+                    BackgroundColor(FLOOD_IDLE),
+                    FloodButton,
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        Text::new("FLOOD!"),
+                        TextFont { font_size: 12.0, ..default() },
+                        TextColor(Color::WHITE),
+                    ));
+                });
+
             panel.spawn((
-                Text::new("[Space] pause\n[R] drain"),
+                Text::new("[Space] pause\n[R] drain\n[F] flood"),
                 TextFont { font_size: 11.0, ..default() },
                 TextColor(Color::srgb(0.65, 0.66, 0.72)),
                 Node { margin: UiRect::top(Val::Px(8.0)), ..default() },
@@ -1037,6 +1078,32 @@ fn handle_wave_buttons(
         if *interaction == Interaction::Pressed {
             wave.pattern = b.0;
         }
+    }
+}
+
+const FLOOD_IDLE: Color = Color::srgb(0.15, 0.30, 0.65);
+const FLOOD_ACTIVE: Color = Color::srgb(0.30, 0.65, 1.00);
+
+/// The FLOOD! button (or F) starts a surge. Pressing again mid-surge restarts
+/// the timer rather than stacking.
+fn handle_flood_button(
+    q: Query<&Interaction, (Changed<Interaction>, With<FloodButton>)>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut surge: ResMut<Surge>,
+) {
+    let clicked = q.iter().any(|i| *i == Interaction::Pressed);
+    if clicked || keys.just_pressed(KeyCode::KeyF) {
+        surge.remaining = SURGE_SECS;
+    }
+}
+
+/// Light the FLOOD! button up while a surge is running.
+fn update_flood_button(surge: Res<Surge>, mut q: Query<&mut BackgroundColor, With<FloodButton>>) {
+    if !surge.is_changed() {
+        return;
+    }
+    for mut bg in &mut q {
+        *bg = BackgroundColor(if surge.remaining > 0.0 { FLOOD_ACTIVE } else { FLOOD_IDLE });
     }
 }
 
@@ -1209,21 +1276,33 @@ fn object_physics(
     }
 }
 
-/// Orbit / pan / zoom the camera. Right-drag orbits, middle-drag pans across the
-/// ground, the scroll wheel zooms. Left-drag is reserved for placing/pouring.
+/// True while a camera modifier (Option/Alt or Shift) is held. Left-drag then
+/// steers the camera instead of placing/pouring — needed on a Magic Mouse,
+/// which has no middle button and an unreliable right-drag.
+fn camera_modifier_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight, KeyCode::ShiftLeft, KeyCode::ShiftRight])
+}
+
+/// Orbit / pan / zoom the camera. Right-drag or Option+left-drag orbits;
+/// middle-drag or Shift+left-drag pans across the ground; the scroll wheel
+/// zooms. Plain left-drag is reserved for placing/pouring.
 fn camera_controls(
     buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     mut orbit: ResMut<OrbitCamera>,
     mut cam: Query<&mut Transform, With<Camera3d>>,
 ) {
     let d = motion.delta;
-    if buttons.pressed(MouseButton::Right) {
+    let left = buttons.pressed(MouseButton::Left);
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if buttons.pressed(MouseButton::Right) || (left && alt) {
         orbit.yaw -= d.x * 0.005;
         orbit.pitch = (orbit.pitch - d.y * 0.005).clamp(0.15, 1.5);
     }
-    if buttons.pressed(MouseButton::Middle) {
+    if buttons.pressed(MouseButton::Middle) || (left && shift && !alt) {
         let pan = orbit.distance * 0.0015;
         let right = Vec3::new(orbit.yaw.cos(), 0.0, -orbit.yaw.sin());
         let fwd = Vec3::new(-orbit.yaw.sin(), 0.0, -orbit.yaw.cos());
@@ -1340,12 +1419,13 @@ fn run_source(
     paused: Res<Paused>,
     source: Res<Source>,
     mut wave: ResMut<Wave>,
+    mut surge: ResMut<Surge>,
     mut water: ResMut<Water>,
 ) {
     if paused.0 {
         return;
     }
-    let mult = match wave.pattern {
+    let mut mult = match wave.pattern {
         WavePattern::Flood => 1.0,
         WavePattern::Sine => (0.5 + 0.5 * (time.elapsed_secs() * SINE_FREQ).sin()).max(0.0),
         WavePattern::Random => {
@@ -1357,6 +1437,12 @@ fn run_source(
             wave.rng_level
         }
     };
+    // Only touch `surge` when a surge is running, so its change detection
+    // (which drives the button colour) fires just on start and end.
+    if surge.remaining > 0.0 {
+        mult += SURGE_MULT;
+        surge.remaining = (surge.remaining - DT).max(0.0);
+    }
     add_water(&mut water, source.x, source.z, source.radius, source.rate * mult * DT, -0.8);
 }
 
@@ -1769,6 +1855,97 @@ mod tests {
                 ObjectConfig { x: 0.45, z: 0.32, weight: 150.0 },
                 ObjectConfig { x: 0.56, z: 0.40, weight: 300.0 },
                 ObjectConfig { x: 0.5, z: fz(ridge_z), weight: 2000.0 },
+            ],
+        );
+    }
+
+    /// Regenerate the cliff levels (waterfall, cascades):
+    ///   cargo test generate_cliff_levels -- --ignored
+    /// A cliff is just a hard edge in the heightmap — one cell high, the next
+    /// one far lower. The weir flux in `step_flow` spills the water over the
+    /// lip, and the water mesh stretches from the lip down to the pool below,
+    /// which draws the falling sheet for free.
+    #[test]
+    #[ignore]
+    fn generate_cliff_levels() {
+        let mid = (W - 1) as f32 * 0.5;
+        let dmax = (D - 1) as f32;
+        // Smooth 0→1 ramp, used to blend channels and pools into the ground.
+        let smooth = |t: f32| {
+            let t = t.clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+
+        // --- Waterfall: a river crosses a high plateau and pours off a ~60 wu
+        // cliff into a plunge pool, then winds down a lower valley to the drain.
+        let cliff_z = 0.42 * dmax; // last row of the plateau (the lip)
+        let pool_z = cliff_z + 11.0; // centre of the plunge pool
+        let upper_c = move |z: f32| mid + 18.0 * (PI * z / cliff_z).sin();
+        let lower_c = move |z: f32| mid + 22.0 * (1.5 * PI * (z - cliff_z) / (dmax - cliff_z)).sin();
+        let waterfall = |x: usize, z: usize| {
+            let (xf, zf) = (x as f32, z as f32);
+            let h = if zf <= cliff_z {
+                // Plateau: gentle tilt toward the lip, river cut into high banks.
+                let base = 95.0 + 12.0 * (1.0 - zf / cliff_z);
+                let over = ((xf - upper_c(zf)).abs() - 7.0).max(0.0);
+                base + (over * over * 0.05).min(30.0)
+            } else {
+                // Lower valley: starts ~60 below the lip and slopes to the drain.
+                let base = 35.0 * (1.0 - (zf - cliff_z) / (dmax - cliff_z));
+                let over = ((xf - lower_c(zf)).abs() - 9.0).max(0.0);
+                let bank = (over * over * 0.04).min(35.0);
+                // Plunge pool: a bowl at the cliff foot; banks fade out inside it.
+                let r = ((xf - mid).powi(2) + (zf - pool_z).powi(2)).sqrt();
+                let pool = 1.0 - smooth(r / 16.0);
+                base + bank * (1.0 - pool) - 18.0 * pool
+            };
+            h.max(0.0) + edge_rim(x, z)
+        };
+        bake(
+            "levels/waterfall.yaml",
+            "Waterfall",
+            &waterfall,
+            SourceConfig { x: fx(upper_c(4.0)), z: fz(4.0), radius: 5, rate: 120.0 },
+            vec![
+                ObjectConfig { x: fx(upper_c(0.20 * dmax)), z: 0.20, weight: 150.0 },
+                ObjectConfig { x: fx(upper_c(0.34 * dmax)), z: 0.34, weight: 300.0 },
+                ObjectConfig { x: fx(lower_c(0.80 * dmax)), z: 0.80, weight: 2500.0 },
+            ],
+        );
+
+        // --- Cascades: four terraces stepping down ~25 wu each. Every lip has
+        // a notch on alternating sides, so the stream zig-zags across the map,
+        // dropping into a small pool at the foot of each fall.
+        let edges = [0.0, 0.28 * dmax, 0.50 * dmax, 0.72 * dmax, dmax]; // terrace boundaries (rows)
+        let bases = [100.0, 72.0, 44.0, 16.0]; // height at each terrace's lip
+        let xs = [0.5, 0.33, 0.67, 0.33, 0.5].map(|f| f * (W - 1) as f32); // stream x at each boundary
+        let cascades = |x: usize, z: usize| {
+            let (xf, zf) = (x as f32, z as f32);
+            let k = (0..4).rev().find(|&k| zf >= edges[k]).unwrap_or(0);
+            let t = (zf - edges[k]) / (edges[k + 1] - edges[k]); // 0 at the foot, 1 at the lip
+            let base = bases[k] + 5.0 * (1.0 - t); // slight tilt toward the lip
+            // Channel bends from where the last fall landed over to this lip's notch.
+            let c = xs[k] + (xs[k + 1] - xs[k]) * smooth(t);
+            let over = ((xf - c).abs() - 6.0).max(0.0);
+            let bank = (over * over * 0.05).min(22.0);
+            // Small plunge pool just below each fall (not on the top terrace).
+            let pool = if k > 0 {
+                let r = ((xf - xs[k]).powi(2) + (zf - edges[k] - 5.0).powi(2)).sqrt();
+                1.0 - smooth(r / 9.0)
+            } else {
+                0.0
+            };
+            (base + bank * (1.0 - pool) - 8.0 * pool).max(0.0) + edge_rim(x, z)
+        };
+        bake(
+            "levels/cascades.yaml",
+            "Cascades",
+            &cascades,
+            SourceConfig { x: fx(xs[0]), z: fz(4.0), radius: 5, rate: 120.0 },
+            vec![
+                ObjectConfig { x: fx(xs[1]), z: 0.24, weight: 150.0 },
+                ObjectConfig { x: fx(xs[2]), z: 0.47, weight: 300.0 },
+                ObjectConfig { x: fx(xs[3]), z: 0.69, weight: 2000.0 },
             ],
         );
     }

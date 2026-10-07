@@ -41,7 +41,8 @@ Things to keep in mind when sculpting:
 - The image's top row is the **back** of the map (where the camera initially
   looks toward); left/right in the image are left/right in the world.
 - Soft gradients (use a blur or soft brush) make natural slopes; hard edges
-  make cliffs.
+  make cliffs. Water pours off a cliff as a waterfall — the water surface
+  stretches from the lip down to the ground below (see the Waterfall level).
 
 ## The yaml
 
@@ -77,6 +78,8 @@ level's starting objects:
 | Winding River | `levels/winding-river.yaml` | Four tight S-bends with steep banks — the current whips around the corners. A 3000 kg block grounds at a bend and forces the river over its banks. |
 | River Delta | `levels/river-delta.yaml` | A steep upper valley splits into three distributaries fanning across a flat marshy mouth. A 2500 kg block sits right on the split — erase or move it to redirect which branches run. |
 | Highland Lake | `levels/highland-lake.yaml` | The source fills a deep basin behind a ridge; the only exit is a narrow spill notch. Watch the lake rise to the sill and pour down the runout — a 2000 kg block starts as a plug in the notch. |
+| Waterfall | `levels/waterfall.yaml` | A river crosses a high plateau and pours off a ~60-unit cliff into a plunge pool, then winds down a lower valley. Light blocks ride the river over the edge; a 2500 kg block dams the lower river. |
+| Cascades | `levels/cascades.yaml` | Four terraces, each ~25 units lower. The stream zig-zags across the map, dropping off a notch at alternating ends of each step into a small pool. A 2000 kg block sits on the third step. |
 
 ## Making a new level
 
@@ -91,12 +94,13 @@ level's starting objects:
 ## Regenerating the shipped levels
 
 The committed level files are baked from generator functions in
-`src/flood.rs` (`terrain_height` for the valley; the `generate_extra_levels`
-test for the rest). To re-bake after changing them:
+`src/flood.rs` (`terrain_height` for the valley; the `generate_extra_levels` and
+`generate_cliff_levels` tests for the rest). To re-bake after changing them:
 
 ```sh
 cargo test generate_valley_level -- --ignored
 cargo test generate_extra_levels -- --ignored
+cargo test generate_cliff_levels -- --ignored
 ```
 
 Hand-edits to the PNGs survive until you re-run these — the generators are
