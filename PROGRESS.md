@@ -367,6 +367,51 @@ src/
   render floor consistent with the sim floor; matching a footprint mask to world-space extent
   instead of a rounded cell radius.
 
+### Session 20 (PNG heightmap levels — terrain edited outside the code)
+
+- **`src/level.rs`** — the level system. A level = `levels/<name>.yaml` (metadata) +
+  `levels/<name>.png` (grayscale heightmap: black = low, white = high). `load` reads the yaml,
+  decodes the PNG (`image::open(..).to_luma16()` — 8-bit widens automatically), and
+  **bilinearly resamples** it onto the W×D grid scaled by `height_scale`. Any image editor is
+  now the level editor. `write_template` does the reverse: bakes a heights array to a 16-bit
+  PNG (normalised so the tallest point is white, `height_scale` records the real max) + yaml.
+- **Map-fraction coordinates** — source/object positions in the yaml are 0..1 fractions of the
+  map, so levels are independent of image size *and* grid resolution.
+- **First-run template** — if `config.yaml`'s `level:` points at a missing file, `setup` bakes
+  the built-in valley (`builtin_level()` — procedural `terrain_height` + default source +
+  starter trio) out as an editable template, same discoverability pattern as `AppConfig::load`.
+  A broken-but-present level file falls back to the built-in valley without overwriting it.
+- **flood.rs integration** — `FloodPlugin { level }` carries the path from config;
+  `Source { x, z, radius, rate }` resource (from the level) replaces the hardcoded
+  `channel_center(4)` feed in `run_source`; `spawn_object` / `draw_placement_cursor` read
+  heights from the `Terrain` resource instead of calling `terrain_height` directly; starter
+  objects come from `level.objects`; terrain colour gradient now spans the *actual* height
+  range so custom maps shade correctly.
+- **`config.rs` trimmed** — `AppConfig` is now just `window_width/height` + `level`
+  (`#[serde(default)]` so missing fields fall back); stale grid fields removed.
+- **Shipped level** — `levels/valley.{yaml,png}` committed, regenerable via
+  `cargo test generate_valley_level -- --ignored` (an `#[ignore]`d golden-file generator test).
+- **Tests** — 4 passing: bilinear resample (identity + midpoint), template round-trip,
+  builtin-valley round-trip (max height error < 0.01 through 16-bit quantisation).
+- **Docs** — `docs/LEVELS.md`: format spec, image-editor workflow (front edge = drain, dark
+  line = water path), how to make a new level, shipped-level table.
+- **Three more shipped levels** (baked by the `generate_extra_levels` ignored test, all
+  smoke-tested loading): **Winding River** (four tight S-bends, steep banks, a 3000 kg block
+  grounded at a bend), **River Delta** (steep stem splits at z=0.4 into three smoothstepped
+  distributaries over a flat fan — banks fade across the fan so spill spreads; 2500 kg block on
+  the split), **Highland Lake** (paraboloid basin behind a gaussian ridge with a notch — lake
+  rises to the sill and pours down a guided runout; 2000 kg block plugs the notch).
+- **In-game level dropdown** — Bevy UI has no dropdown widget, so it's a button + collapsible
+  list: `LevelLibrary` (scanned from `levels/*.yaml` at startup, labelled by each yaml's
+  `name:`), a `LevelOptions` container toggled via `Display::None/Flex`, and a `PendingLevel`
+  resource consumed by `switch_level`, which rebuilds the terrain mesh **in place**
+  (`Assets::insert` on the kept `TerrainMesh` handle — returns a `Result` in 0.18), zeroes the
+  water fields, despawns/respawns `FloatObject`s, and moves the `Source`. Startup is now
+  `(setup, setup_ui).chain()` so the UI can read the library `setup` inserts (Bevy auto-inserts
+  the command flush between chained systems).
+- **Concepts** — `image` crate (decode to `Luma<u16>`, `ImageBuffer::save`); bilinear
+  sampling; golden-file generation via an ignored test; plugin structs with config fields.
+
 ## Where We Left Off (current)
 
 Weir-model overtopping done on `feat/heightfield-water`: water backs up behind a grounded block and
@@ -388,4 +433,5 @@ Not yet pushed; old 2D code preserved on `main`.
   (rand stays — used by Random wave; `serde_json`/`rfd` go); remove `camera.rs`/`textures.rs`/old levels.
 - **Tests** — extract pure sim helpers (flow, buoyancy, obstacle) and unit-test them.
 - **Object destruction** — a strong enough current sweeps away or breaks objects.
-- **Levels** — author terrain heightmaps; save/load.
+- ~~**Levels** — author terrain heightmaps; save/load.~~ Done (session 20): PNG heightmap +
+  yaml levels, see `docs/LEVELS.md`. Remaining: more shipped levels, in-game level picker.

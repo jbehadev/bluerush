@@ -9,6 +9,7 @@ dependencies = [
  "bevy",
  "bevy_asset",
  "bevy_mesh",
+ "image",
  "rand 0.8.5",
  "rfd",
  "serde",

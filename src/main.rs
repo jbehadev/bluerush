@@ -7,6 +7,7 @@ use crate::config::AppConfig;
 
 mod config;
 mod flood;
+mod level;
 
 fn main() {
     let config = AppConfig::load();
@@ -24,6 +25,6 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins(flood::FloodPlugin)
+        .add_plugins(flood::FloodPlugin { level: config.level.clone() })
         .run();
 }

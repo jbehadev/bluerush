@@ -18,23 +18,31 @@ use bevy_asset::RenderAssetUsages;
 use bevy_mesh::{Indices, PrimitiveTopology};
 use std::collections::HashMap;
 
+use crate::level::{self, LoadedLevel, ObjectConfig, SourceConfig};
+
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
 
-const W: usize = 100;
-const D: usize = 100;
-const CELL: f32 = 6.0;
+// Grid resolution + cell size. The world span (≈ W·CELL) is kept ~constant when
+// changing these, so the camera framing stays put; only the detail changes.
+// NOTE: the channel-shape constants below (MEANDER_AMPL, CHANNEL_HW, BANK_K,
+// SOURCE_R) are in *cell* units, so they're scaled to CELL to keep the river the
+// same physical size — halving CELL means ~doubling those cell counts.
+const W: usize = 150;
+const D: usize = 150;
+const CELL: f32 = 4.0;
 const SLOPE_HEIGHT: f32 = 45.0; // stream bed drops this much from back (z=0) to front
-const MEANDER_AMPL: f32 = 26.0; // how far (cells) the stream snakes left/right
-const MEANDER_FREQ: f32 = 2.0 * std::f32::consts::PI * 1.5 / D as f32; // ~1.5 S-curves down the length
-const CHANNEL_HW: f32 = 7.0; // half-width (cells) of the low stream bed
-const BANK_K: f32 = 0.04; // how steeply the banks rise beyond the channel
+const MEANDER_AMPL: f32 = 32.0; // how far (cells) the stream snakes left/right
+const MEANDER_FREQ: f32 = 2.0 * std::f32::consts::PI * 2.5 / D as f32; // ~2.5 S-curves down the length
+const CHANNEL_HW: f32 = 10.5; // half-width (cells) of the low stream bed
+const BANK_K: f32 = 0.018; // how steeply the banks rise beyond the channel (∝ 1/CELL²)
 const BANK_MAX: f32 = 55.0; // cap on bank height
-const REF_HEIGHT: f32 = 30.0; // a mid height, used to aim mouse rays at the channel
+const RIM_WIDTH: f32 = 4.0; // cells of raised containing wall along the left/right/back edges
+const RIM_HEIGHT: f32 = 60.0; // how tall that wall rises (world units) so water can't spill off the map
 
 const SOURCE_RATE: f32 = 110.0; // water depth/sec added at the source (spread over a patch)
-const SOURCE_R: i32 = 3; // source patch radius (wider = gentler, no spike)
+const SOURCE_R: i32 = 5; // source patch radius in cells (wider = gentler, no spike)
 const POUR_RATE: f32 = 220.0; // water depth/sec added under the mouse
 
 // Weighted objects the flood pushes and floats. Size scales with weight, so a
@@ -90,12 +98,44 @@ fn cell_to_world(cx: f32, cz: f32) -> Vec2 {
 /// Stream-bed terrain: a low winding channel (following `channel_center`) that
 /// slopes downhill from the back (z=0, high) to the front (z=D-1, low), with
 /// banks rising on either side. Water snakes down the channel as a current.
+/// This is the BUILT-IN fallback terrain — normally the terrain comes from a
+/// level's heightmap PNG (see `level.rs`); this also seeds the first level
+/// template written to disk.
 fn terrain_height(x: usize, z: usize) -> f32 {
     let slope = (1.0 - z as f32 / (D - 1) as f32) * SLOPE_HEIGHT;
     let dist = (x as f32 - channel_center(z)).abs();
     let over = (dist - CHANNEL_HW).max(0.0);
     let bank = (over * over * BANK_K).min(BANK_MAX);
-    slope + bank
+    slope + bank + edge_rim(x, z)
+}
+
+/// Containing rim along the left/right/back edges so water visibly can't
+/// escape the map. The front edge (z = D-1) stays open — it's the drain.
+/// Shared by the built-in valley and the level-generator tests.
+fn edge_rim(x: usize, z: usize) -> f32 {
+    let edge = (x.min(W - 1 - x) as f32).min(z as f32);
+    let rim_t = (1.0 - edge / RIM_WIDTH).clamp(0.0, 1.0);
+    rim_t * rim_t * RIM_HEIGHT
+}
+
+/// The built-in valley as a level: procedural heights plus the default source
+/// (top of the stream bed) and starter object trio (light / medium / heavy in
+/// the channel). Used when the configured level can't be loaded, and baked out
+/// as the first editable level template.
+fn builtin_level() -> LoadedLevel {
+    let heights = (0..W * D).map(|i| terrain_height(i % W, i / W)).collect();
+    let fx = |cx: f32| cx / (W - 1) as f32;
+    let fz = |cz: usize| cz as f32 / (D - 1) as f32;
+    LoadedLevel {
+        name: "Valley".into(),
+        heights,
+        source: SourceConfig { x: fx(channel_center(4)), z: fz(4), radius: SOURCE_R, rate: SOURCE_RATE },
+        objects: vec![
+            ObjectConfig { x: fx(channel_center(D / 2)), z: fz(D / 2), weight: 4000.0 },
+            ObjectConfig { x: fx(channel_center(D / 3)), z: fz(D / 3), weight: 150.0 },
+            ObjectConfig { x: fx(channel_center(2 * D / 3)), z: fz(2 * D / 3), weight: 800.0 },
+        ],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +144,65 @@ fn terrain_height(x: usize, z: usize) -> f32 {
 
 #[derive(Resource)]
 struct Terrain(Vec<f32>);
+
+/// Path of the level yaml to load (from `config.yaml`), set by `FloodPlugin`.
+#[derive(Resource)]
+struct LevelPath(String);
+
+/// All levels found next to the configured one, for the in-game selector.
+#[derive(Resource)]
+struct LevelLibrary {
+    entries: Vec<LevelEntry>,
+    /// Display name of the level currently playing (shown on the dropdown).
+    current_name: String,
+}
+
+struct LevelEntry {
+    name: String,
+    path: String,
+}
+
+/// Index into `LevelLibrary.entries` to switch to next frame (set by the
+/// dropdown, consumed by `switch_level`).
+#[derive(Resource, Default)]
+struct PendingLevel(Option<usize>);
+
+/// Handle of the terrain mesh, kept so a level switch can rebuild it in place.
+#[derive(Resource)]
+struct TerrainMesh(Handle<Mesh>);
+
+/// Scan a directory for level yamls, labelled by their `name:` field (file
+/// stem if the yaml doesn't parse). Sorted by name for a stable dropdown.
+fn scan_levels(dir: &std::path::Path) -> Vec<LevelEntry> {
+    let mut entries = Vec::new();
+    let Ok(read_dir) = std::fs::read_dir(dir) else { return entries };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+            continue;
+        }
+        let name = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|y| serde_yaml::from_str::<level::LevelConfig>(&y).ok())
+            .map(|c| c.name)
+            .unwrap_or_else(|| {
+                path.file_stem().unwrap_or_default().to_string_lossy().into_owned()
+            });
+        entries.push(LevelEntry { name, path: path.to_string_lossy().into_owned() });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
+/// Where (and how fast) water enters the map, resolved from the level to grid
+/// cells. `run_source` feeds this patch every frame.
+#[derive(Resource)]
+struct Source {
+    x: usize,
+    z: usize,
+    radius: i32,
+    rate: f32,
+}
 
 #[derive(Resource)]
 struct Water {
@@ -179,6 +278,17 @@ struct PourButton;
 struct EraseButton;
 #[derive(Component)]
 struct WaveButton(WavePattern);
+/// The collapsed dropdown button showing the current level's name.
+#[derive(Component)]
+struct LevelDropdownButton;
+#[derive(Component)]
+struct LevelDropdownLabel;
+/// The (initially hidden) container holding one button per level.
+#[derive(Component)]
+struct LevelOptions;
+/// A level choice; the index points into `LevelLibrary.entries`.
+#[derive(Component)]
+struct LevelOptionButton(usize);
 
 /// Whether the simulation is paused. Input, camera, and rendering keep running;
 /// only the water + object simulation freezes.
@@ -221,15 +331,80 @@ fn cell_of(pos: Vec2) -> (usize, usize) {
     (gx, gz)
 }
 
+/// Height of the visible surface (terrain, plus any water on it) at world (x, z),
+/// or `None` if the point is off the grid.
+fn surface_height(terrain: &[f32], water: &Water, pos: Vec2) -> Option<f32> {
+    let off = half();
+    if pos.x.abs() > off || pos.y.abs() > off {
+        return None;
+    }
+    let (gx, gz) = cell_of(pos);
+    let i = idx(gx, gz);
+    Some(terrain[i] + water.depth[i])
+}
+
+/// Cast the mouse ray onto the visible terrain/water surface. Marches along the
+/// ray from the top of the heightfield in sub-cell steps until it dips below the
+/// surface, then bisects to refine — so the hit is where the cursor *looks*.
+fn cursor_hit(
+    window: &Window,
+    camera: &Camera,
+    cam_t: &GlobalTransform,
+    terrain: &[f32],
+    water: &Water,
+) -> Option<Vec3> {
+    let cursor = window.cursor_position()?;
+    if cursor.x < PANEL_WIDTH {
+        return None; // over the UI panel, not the world
+    }
+    let ray = camera.viewport_to_world(cam_t, cursor).ok()?;
+    let dir = *ray.direction;
+    if dir.y >= -1e-5 {
+        return None; // looking up / level: never meets the ground
+    }
+    // Start where the ray drops to the highest point of the surface, end where
+    // it falls below the lowest — the hit must lie between.
+    let (lo, hi) = terrain
+        .iter()
+        .zip(&water.depth)
+        .map(|(t, d)| t + d)
+        .fold((f32::MAX, f32::MIN), |(lo, hi), h| (lo.min(h), hi.max(h)));
+    let t_start = ((hi - ray.origin.y) / dir.y).max(0.0);
+    let t_end = (lo - ray.origin.y) / dir.y;
+    let step = CELL * 0.5;
+
+    let above = |t: f32| {
+        let p = ray.origin + dir * t;
+        surface_height(terrain, water, Vec2::new(p.x, p.z)).map(|h| p.y > h)
+    };
+    let mut prev = t_start;
+    let mut t = t_start;
+    while t <= t_end + step {
+        if above(t) == Some(false) {
+            // Crossed the surface between `prev` and `t`: bisect to pin it down.
+            let (mut a, mut b) = (prev, t);
+            for _ in 0..8 {
+                let m = (a + b) * 0.5;
+                if above(m) == Some(false) { b = m } else { a = m }
+            }
+            return Some(ray.origin + dir * b);
+        }
+        prev = t;
+        t += step;
+    }
+    None
+}
+
 fn spawn_object(
     commands: &mut Commands,
     cube: Handle<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    terrain: &[f32],
     pos: Vec2,
     weight: f32,
 ) {
     let (gx, gz) = cell_of(pos);
-    let y = terrain_height(gx, gz);
+    let y = terrain[idx(gx, gz)];
     let h = obj_height(weight);
     let fp = obj_footprint(weight);
     commands.spawn((
@@ -251,15 +426,21 @@ fn spawn_object(
 /// The heightfield flood game: a meandering stream bed that floods, carries
 /// weighted objects on its current, and lets grounded objects dam the flow.
 /// Add this to the app; the window/config live in `main.rs`.
-pub struct FloodPlugin;
+pub struct FloodPlugin {
+    /// Path of the level yaml to load (from `config.yaml`).
+    pub level: String,
+}
 
 impl Plugin for FloodPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ClearColor(Color::srgb(0.45, 0.62, 0.78)))
+        app.insert_resource(LevelPath(self.level.clone()))
+            .insert_resource(ClearColor(Color::srgb(0.45, 0.62, 0.78)))
             .insert_resource(SelectedTool::Object(500.0))
             .insert_resource(Wave { pattern: WavePattern::Flood, rng_level: 1.0, since_roll: 0.0 })
             .insert_resource(Paused(false))
-            .add_systems(Startup, (setup, setup_ui))
+            .insert_resource(PendingLevel::default())
+            // setup builds the LevelLibrary that setup_ui's dropdown lists.
+            .add_systems(Startup, (setup, setup_ui).chain())
             // UI / camera / input handling (order-independent).
             .add_systems(
                 Update,
@@ -268,6 +449,8 @@ impl Plugin for FloodPlugin {
                     handle_pour_button,
                     handle_erase_button,
                     handle_wave_buttons,
+                    handle_level_dropdown,
+                    handle_level_option,
                     update_tool_highlight,
                     update_wave_highlight,
                     toggle_pause,
@@ -281,6 +464,7 @@ impl Plugin for FloodPlugin {
             .add_systems(
                 Update,
                 (
+                    switch_level,
                     drain_on_key,
                     run_source,
                     handle_click,
@@ -301,6 +485,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    level_path: Res<LevelPath>,
 ) {
     commands.spawn((
         Camera3d::default(),
@@ -312,11 +497,35 @@ fn setup(
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.9, 0.5, 0.0)),
     ));
 
-    // Terrain heights + a static terrain mesh (the bowl).
-    let terrain: Vec<f32> = (0..W * D).map(|i| terrain_height(i % W, i / W)).collect();
-    let terrain_mesh = build_terrain_mesh(&terrain);
+    // Terrain comes from the configured level (heightmap PNG + yaml). If the
+    // level file doesn't exist yet, bake the built-in valley out as an editable
+    // template — edit the PNG in any image editor to reshape the terrain.
+    let loaded = match level::load(&level_path.0, W, D) {
+        Ok(l) => {
+            println!("Loaded level '{}' from {}", l.name, level_path.0);
+            l
+        }
+        Err(e) => {
+            let l = builtin_level();
+            if std::path::Path::new(&level_path.0).exists() {
+                eprintln!("Failed to load level {}: {e} — using built-in valley", level_path.0);
+            } else {
+                match level::write_template(&level_path.0, &l, W, D) {
+                    Ok(()) => println!(
+                        "Wrote level template to {} — edit the PNG next to it to reshape the terrain",
+                        level_path.0
+                    ),
+                    Err(e) => eprintln!("Failed to write level template {}: {e}", level_path.0),
+                }
+            }
+            l
+        }
+    };
+    let terrain = loaded.heights;
+    let terrain_mesh = meshes.add(build_terrain_mesh(&terrain));
+    commands.insert_resource(TerrainMesh(terrain_mesh.clone()));
     commands.spawn((
-        Mesh3d(meshes.add(terrain_mesh)),
+        Mesh3d(terrain_mesh),
         MeshMaterial3d(materials.add(StandardMaterial {
             // White base so the per-vertex height gradient (brown → green) shows.
             base_color: Color::WHITE,
@@ -354,24 +563,41 @@ fn setup(
         Transform::IDENTITY,
     ));
 
-    // Object spawning assets + a starter trio (light / medium / heavy) so the
-    // weight difference is visible as the bowl floods.
-    // Objects sitting IN the stream bed: a heavy block mid-stream (grounds and
-    // dams the flow), a light block upstream (washes down the meander), and a
-    // medium block further downstream.
+    // Object spawning assets + the level's starting objects (the built-in
+    // valley places a light / medium / heavy trio in the stream bed so the
+    // weight difference is visible as it floods).
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0)); // unit cube, scaled per object by weight
-    spawn_object(&mut commands, cube.clone(), &mut materials,
-        cell_to_world(channel_center(D / 2), (D / 2) as f32), 4000.0);
-    spawn_object(&mut commands, cube.clone(), &mut materials,
-        cell_to_world(channel_center(D / 3), (D / 3) as f32), 150.0);
-    spawn_object(&mut commands, cube.clone(), &mut materials,
-        cell_to_world(channel_center(2 * D / 3), (2 * D / 3) as f32), 800.0);
+    for obj in &loaded.objects {
+        let cx = obj.x * (W - 1) as f32;
+        let cz = obj.z * (D - 1) as f32;
+        spawn_object(&mut commands, cube.clone(), &mut materials, &terrain,
+            cell_to_world(cx, cz), obj.weight);
+    }
+
+    // The water source, resolved from map fractions to grid cells.
+    let source = Source {
+        x: (loaded.source.x * (W - 1) as f32).round().clamp(0.0, (W - 1) as f32) as usize,
+        z: (loaded.source.z * (D - 1) as f32).round().clamp(0.0, (D - 1) as f32) as usize,
+        radius: loaded.source.radius,
+        rate: loaded.source.rate,
+    };
+
+    // Catalogue every level sitting next to the configured one (after the
+    // template write above, so a fresh template lists itself too).
+    let level_dir = std::path::Path::new(&level_path.0)
+        .parent()
+        .unwrap_or(std::path::Path::new("levels"));
+    commands.insert_resource(LevelLibrary {
+        entries: scan_levels(level_dir),
+        current_name: loaded.name.clone(),
+    });
 
     commands.insert_resource(Terrain(terrain));
     commands.insert_resource(water);
     commands.insert_resource(WaterMesh(water_handle));
     commands.insert_resource(ObjectAssets { cube });
     commands.insert_resource(Obstacle(vec![0.0; W * D]));
+    commands.insert_resource(source);
 }
 
 /// Mark cells under grounded (can't-float) objects as raised floor, so the flow
@@ -457,6 +683,7 @@ fn handle_click(
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     tool: Res<SelectedTool>,
+    terrain: Res<Terrain>,
     mut water: ResMut<Water>,
     assets: Res<ObjectAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -464,21 +691,8 @@ fn handle_click(
     mut commands: Commands,
 ) {
     let Ok(window) = windows.single() else { return };
-    let Some(cursor) = window.cursor_position() else { return };
-    if cursor.x < PANEL_WIDTH {
-        return; // a click on the UI panel, not the world
-    }
     let Ok((camera, cam_t)) = cameras.single() else { return };
-    let Ok(ray) = camera.viewport_to_world(cam_t, cursor) else { return };
-    let dir = *ray.direction;
-    if dir.y.abs() < 1e-5 {
-        return;
-    }
-    let t = (REF_HEIGHT * 0.5 - ray.origin.y) / dir.y;
-    if t < 0.0 {
-        return;
-    }
-    let hit = ray.origin + dir * t;
+    let Some(hit) = cursor_hit(window, camera, cam_t, &terrain.0, &water) else { return };
 
     match *tool {
         SelectedTool::Pour => {
@@ -493,7 +707,8 @@ fn handle_click(
         }
         SelectedTool::Object(w) => {
             if mouse.just_pressed(MouseButton::Left) {
-                spawn_object(&mut commands, assets.cube.clone(), &mut materials, Vec2::new(hit.x, hit.z), w);
+                spawn_object(&mut commands, assets.cube.clone(), &mut materials, &terrain.0,
+                    Vec2::new(hit.x, hit.z), w);
             }
         }
         SelectedTool::Erase => {
@@ -526,7 +741,7 @@ const BTN_ON: Color = Color::srgb(0.85, 0.72, 0.20);
 const POUR_OFF: Color = Color::srgb(0.15, 0.35, 0.55);
 const POUR_ON: Color = Color::srgb(0.25, 0.65, 0.95);
 
-fn setup_ui(mut commands: Commands) {
+fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
     commands
         .spawn((
             Node {
@@ -543,7 +758,70 @@ fn setup_ui(mut commands: Commands) {
             BackgroundColor(Color::srgb(0.10, 0.11, 0.14)),
         ))
         .with_children(|panel| {
-            // Pause / Run toggle at the top.
+            // Level dropdown: the button shows the current level; clicking it
+            // expands the list of levels found in the levels directory.
+            panel.spawn((
+                Text::new("LEVEL"),
+                TextFont { font_size: 11.0, ..default() },
+                TextColor(Color::srgb(0.65, 0.66, 0.72)),
+            ));
+            panel
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(26.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.28, 0.30, 0.38)),
+                    LevelDropdownButton,
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        Text::new(library.current_name.clone()),
+                        TextFont { font_size: 11.0, ..default() },
+                        TextColor(Color::WHITE),
+                        LevelDropdownLabel,
+                    ));
+                });
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(2.0),
+                        display: Display::None, // closed until the button is clicked
+                        ..default()
+                    },
+                    LevelOptions,
+                ))
+                .with_children(|opts| {
+                    for (i, entry) in library.entries.iter().enumerate() {
+                        opts.spawn((
+                            Button,
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Px(22.0),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.16, 0.18, 0.24)),
+                            LevelOptionButton(i),
+                        ))
+                        .with_children(|b| {
+                            b.spawn((
+                                Text::new(entry.name.clone()),
+                                TextFont { font_size: 10.0, ..default() },
+                                TextColor(Color::srgb(0.85, 0.86, 0.90)),
+                            ));
+                        });
+                    }
+                });
+
+            // Pause / Run toggle.
             panel
                 .spawn((
                     Button,
@@ -762,6 +1040,98 @@ fn handle_wave_buttons(
     }
 }
 
+/// Clicking the dropdown button opens/closes the level list.
+fn handle_level_dropdown(
+    q: Query<&Interaction, (Changed<Interaction>, With<LevelDropdownButton>)>,
+    mut options: Query<&mut Node, With<LevelOptions>>,
+) {
+    for interaction in &q {
+        if *interaction == Interaction::Pressed {
+            for mut node in &mut options {
+                node.display =
+                    if node.display == Display::None { Display::Flex } else { Display::None };
+            }
+        }
+    }
+}
+
+/// Clicking a level in the list queues the switch and closes the dropdown.
+fn handle_level_option(
+    q: Query<(&Interaction, &LevelOptionButton), Changed<Interaction>>,
+    mut pending: ResMut<PendingLevel>,
+    mut options: Query<&mut Node, With<LevelOptions>>,
+) {
+    for (interaction, choice) in &q {
+        if *interaction == Interaction::Pressed {
+            pending.0 = Some(choice.0);
+            for mut node in &mut options {
+                node.display = Display::None;
+            }
+        }
+    }
+}
+
+/// Apply a queued level switch: rebuild the terrain mesh in place, reset the
+/// water, replace the objects with the level's starting set, and move the
+/// source. On a load error the current level stays and the error is printed.
+fn switch_level(
+    mut pending: ResMut<PendingLevel>,
+    library: Res<LevelLibrary>,
+    mut terrain: ResMut<Terrain>,
+    mut water: ResMut<Water>,
+    mut source: ResMut<Source>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    terrain_mesh: Res<TerrainMesh>,
+    assets: Res<ObjectAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    objects: Query<Entity, With<FloatObject>>,
+    mut label: Query<&mut Text, With<LevelDropdownLabel>>,
+    mut commands: Commands,
+) {
+    let Some(i) = pending.0.take() else { return };
+    let entry = &library.entries[i];
+    let loaded = match level::load(&entry.path, W, D) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Failed to load level {}: {e} — keeping the current level", entry.path);
+            return;
+        }
+    };
+
+    if let Err(e) = meshes.insert(terrain_mesh.0.id(), build_terrain_mesh(&loaded.heights)) {
+        eprintln!("Failed to swap terrain mesh: {e} — keeping the current level");
+        return;
+    }
+    terrain.0 = loaded.heights;
+
+    water.depth.iter_mut().for_each(|v| *v = 0.0);
+    water.ripple.iter_mut().for_each(|v| *v = 0.0);
+    water.rvel.iter_mut().for_each(|v| *v = 0.0);
+    water.flow.iter_mut().for_each(|v| *v = Vec2::ZERO);
+
+    for entity in &objects {
+        commands.entity(entity).despawn();
+    }
+    for obj in &loaded.objects {
+        let cx = obj.x * (W - 1) as f32;
+        let cz = obj.z * (D - 1) as f32;
+        spawn_object(&mut commands, assets.cube.clone(), &mut materials, &terrain.0,
+            cell_to_world(cx, cz), obj.weight);
+    }
+
+    *source = Source {
+        x: (loaded.source.x * (W - 1) as f32).round().clamp(0.0, (W - 1) as f32) as usize,
+        z: (loaded.source.z * (D - 1) as f32).round().clamp(0.0, (D - 1) as f32) as usize,
+        radius: loaded.source.radius,
+        rate: loaded.source.rate,
+    };
+
+    for mut text in &mut label {
+        *text = Text::new(loaded.name.clone());
+    }
+    println!("Loaded level '{}' from {}", loaded.name, entry.path);
+}
+
 fn update_tool_highlight(
     tool: Res<SelectedTool>,
     mut weights: Query<(&WeightButton, &mut BackgroundColor)>,
@@ -879,30 +1249,15 @@ fn draw_placement_cursor(
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     tool: Res<SelectedTool>,
+    terrain: Res<Terrain>,
+    water: Res<Water>,
     mut gizmos: Gizmos,
 ) {
     let Ok(window) = windows.single() else { return };
-    let Some(cursor) = window.cursor_position() else { return };
-    if cursor.x < PANEL_WIDTH {
-        return;
-    }
     let Ok((camera, cam_t)) = cameras.single() else { return };
-    let Ok(ray) = camera.viewport_to_world(cam_t, cursor) else { return };
-    let dir = *ray.direction;
-    if dir.y.abs() < 1e-5 {
-        return;
-    }
-    let t = (REF_HEIGHT * 0.5 - ray.origin.y) / dir.y;
-    if t < 0.0 {
-        return;
-    }
-    let hit = ray.origin + dir * t;
-    let off = half();
-    if hit.x.abs() > off || hit.z.abs() > off {
-        return; // off the terrain
-    }
+    let Some(hit) = cursor_hit(window, camera, cam_t, &terrain.0, &water) else { return };
     let (gx, gz) = cell_of(Vec2::new(hit.x, hit.z));
-    let ground = terrain_height(gx, gz);
+    let ground = terrain.0[idx(gx, gz)];
 
     let mut edge = |a: Vec3, b: Vec3, c: Color| {
         gizmos.line(a, b, c);
@@ -977,11 +1332,16 @@ fn sync_objects(mut q: Query<(&FloatObject, &mut Transform)>) {
     }
 }
 
-/// Add water at the central source every frame, plus under the mouse when held.
-/// Each injection also kicks the ripple field so the inflow looks alive.
-/// Feed the source at the top of the stream bed every frame, modulated by the
-/// selected wave pattern (steady / pulsing / gusty).
-fn run_source(time: Res<Time>, paused: Res<Paused>, mut wave: ResMut<Wave>, mut water: ResMut<Water>) {
+/// Feed the level's source patch every frame, modulated by the selected wave
+/// pattern (steady / pulsing / gusty). Each injection also kicks the ripple
+/// field so the inflow looks alive.
+fn run_source(
+    time: Res<Time>,
+    paused: Res<Paused>,
+    source: Res<Source>,
+    mut wave: ResMut<Wave>,
+    mut water: ResMut<Water>,
+) {
     if paused.0 {
         return;
     }
@@ -997,8 +1357,7 @@ fn run_source(time: Res<Time>, paused: Res<Paused>, mut wave: ResMut<Wave>, mut 
             wave.rng_level
         }
     };
-    let sx = channel_center(4).round().clamp(0.0, (W - 1) as f32) as usize;
-    add_water(&mut water, sx, 4, SOURCE_R, SOURCE_RATE * mult * DT, -0.8);
+    add_water(&mut water, source.x, source.z, source.radius, source.rate * mult * DT, -0.8);
 }
 
 /// Press R to drain all the water (the source then refills it from empty).
@@ -1229,7 +1588,9 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
     let mut colors = vec![[1.0f32; 4]; W * D];
     let sand = Color::srgb(0.80, 0.66, 0.44).to_linear();
     let green = Color::srgb(0.38, 0.52, 0.26).to_linear();
-    let max_h = SLOPE_HEIGHT + BANK_MAX;
+    // Span the gradient over the actual height range, so any level heightmap
+    // (not just the built-in valley) shades low → high correctly.
+    let max_h = t.iter().fold(0.0f32, |a, &b| a.max(b)).max(1.0);
     for z in 0..D {
         for x in 0..W {
             let i = idx(x, z);
@@ -1267,4 +1628,168 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::PI;
+
+    /// Regenerate the shipped valley level files from the procedural terrain:
+    ///   cargo test generate_valley_level -- --ignored
+    /// Ignored by default so a plain `cargo test` never rewrites level assets.
+    #[test]
+    #[ignore]
+    fn generate_valley_level() {
+        let level = builtin_level();
+        level::write_template("levels/valley.yaml", &level, W, D).unwrap();
+    }
+
+    /// Bake a height function out as an editable level (yaml + heightmap PNG).
+    fn bake(
+        path: &str,
+        name: &str,
+        h: &dyn Fn(usize, usize) -> f32,
+        source: SourceConfig,
+        objects: Vec<ObjectConfig>,
+    ) {
+        let heights = (0..W * D).map(|i| h(i % W, i / W)).collect();
+        let level = LoadedLevel { name: name.into(), heights, source, objects };
+        level::write_template(path, &level, W, D).unwrap();
+    }
+
+    /// Map a cell x / z to the 0..1 map fraction used by level files.
+    fn fx(cx: f32) -> f32 {
+        cx / (W - 1) as f32
+    }
+    fn fz(cz: f32) -> f32 {
+        cz / (D - 1) as f32
+    }
+
+    /// Regenerate the extra shipped levels (winding river, river delta,
+    /// highland lake):
+    ///   cargo test generate_extra_levels -- --ignored
+    /// Like the valley, these are seeds for hand-editing — the PNGs on disk
+    /// are the source of truth at runtime.
+    #[test]
+    #[ignore]
+    fn generate_extra_levels() {
+        let mid = (W - 1) as f32 * 0.5;
+        let dmax = (D - 1) as f32;
+
+        // --- Winding River: tighter, deeper S-curves than the valley. The
+        // current whips around four full bends; light blocks race them, the
+        // heavy block grounds at a bend and forces the water over its banks.
+        let center = |z: f32| mid + 42.0 * (z * 2.0 * PI * 4.0 / D as f32).sin();
+        let winding = |x: usize, z: usize| {
+            let slope = (1.0 - z as f32 / dmax) * 55.0;
+            let over = ((x as f32 - center(z as f32)).abs() - 6.5).max(0.0);
+            slope + (over * over * 0.05).min(60.0) + edge_rim(x, z)
+        };
+        bake(
+            "levels/winding-river.yaml",
+            "Winding River",
+            &winding,
+            SourceConfig { x: fx(center(4.0)), z: fz(4.0), radius: 4, rate: 120.0 },
+            vec![
+                ObjectConfig { x: fx(center(0.20 * dmax)), z: 0.20, weight: 150.0 },
+                ObjectConfig { x: fx(center(0.45 * dmax)), z: 0.45, weight: 800.0 },
+                ObjectConfig { x: fx(center(0.65 * dmax)), z: 0.65, weight: 3000.0 },
+            ],
+        );
+
+        // --- River Delta: one stem meanders down a steep upper valley, then
+        // splits into three distributaries fanning across a flat marshy mouth.
+        // Banks shrink across the fan, so backed-up water spills between the
+        // branches. The heavy block sits right on the split — nudge the flow.
+        let split = 0.40; // map fraction where the stem divides
+        let main_c = |z: f32| mid + 10.0 * (z * 2.0 * PI / D as f32).sin();
+        let stem_end = main_c(split * dmax);
+        let targets = [0.16 * (W - 1) as f32, mid, 0.84 * (W - 1) as f32];
+        // 0 → just split, 1 → river mouth, smoothstepped so branches peel away gently.
+        let fan = move |zf: f32| {
+            let t = ((zf - split) / (1.0 - split)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        let branch_x = move |k: usize, zf: f32| stem_end + (targets[k] - stem_end) * fan(zf);
+        let delta = |x: usize, z: usize| {
+            let zf = z as f32 / dmax;
+            let slope = 60.0 * (1.0 - zf).powf(1.6); // steep valley, flat fan
+            let dist = if zf < split {
+                (x as f32 - main_c(z as f32)).abs()
+            } else {
+                (0..3).map(|k| (x as f32 - branch_x(k, zf)).abs()).fold(f32::MAX, f32::min)
+            };
+            let s = fan(zf);
+            let over = (dist - (9.0 - 3.5 * s)).max(0.0); // branches narrower than the stem
+            let bank_max = 55.0 - 37.0 * s; // banks fade out across the fan
+            slope + (over * over * 0.045).min(bank_max) + edge_rim(x, z)
+        };
+        bake(
+            "levels/river-delta.yaml",
+            "River Delta",
+            &delta,
+            SourceConfig { x: fx(main_c(4.0)), z: fz(4.0), radius: 5, rate: 140.0 },
+            vec![
+                ObjectConfig { x: fx(stem_end), z: split, weight: 2500.0 },
+                ObjectConfig { x: fx(branch_x(0, 0.75)), z: 0.75, weight: 150.0 },
+                ObjectConfig { x: fx(branch_x(2, 0.75)), z: 0.75, weight: 300.0 },
+            ],
+        );
+
+        // --- Highland Lake: the source fills a deep basin behind a ridge.
+        // The only way out is a narrow spill notch — the lake rises to the
+        // sill, then pours down a guided runout channel. A heavy block starts
+        // as a plug in the notch; floats ride the lake up and out.
+        let ridge_z = 0.67 * dmax;
+        let lake = |x: usize, z: usize| {
+            let (xf, zf) = (x as f32, z as f32);
+            let mut h = (1.0 - zf / dmax) * 35.0 + 20.0;
+            // Basin: a paraboloid dip, floor well below the spill sill.
+            let r2 = (xf - mid).powi(2) + (zf - 0.37 * dmax).powi(2);
+            h -= 26.0 * (1.0 - r2 / (38.0f32 * 38.0)).max(0.0);
+            // Ridge wall with a notch at the centre — the spillway sill.
+            let ridge = 60.0 * (-((zf - ridge_z) / 7.0).powi(2)).exp();
+            let notch = 1.0 - 0.92 * (-((xf - mid) / 7.0).powi(2)).exp();
+            h += ridge * notch;
+            // Runout banks guiding the spill from the notch to the drain.
+            if zf > ridge_z {
+                let over = ((xf - mid).abs() - 7.0).max(0.0);
+                let guide = ((zf - ridge_z) / 30.0).clamp(0.0, 1.0);
+                h += (over * over * 0.03).min(25.0) * guide;
+            }
+            h + edge_rim(x, z)
+        };
+        bake(
+            "levels/highland-lake.yaml",
+            "Highland Lake",
+            &lake,
+            SourceConfig { x: 0.5, z: fz(4.0), radius: 5, rate: 120.0 },
+            vec![
+                ObjectConfig { x: 0.45, z: 0.32, weight: 150.0 },
+                ObjectConfig { x: 0.56, z: 0.40, weight: 300.0 },
+                ObjectConfig { x: 0.5, z: fz(ridge_z), weight: 2000.0 },
+            ],
+        );
+    }
+
+    /// The built-in valley round-trips through the level template format: the
+    /// heights baked to PNG come back (within 16-bit quantisation) on load.
+    #[test]
+    fn test_builtin_level_round_trip() {
+        let dir = std::env::temp_dir().join("bluerush_flood_test");
+        let path = dir.join("valley.yaml");
+        let level = builtin_level();
+        level::write_template(path.to_str().unwrap(), &level, W, D).unwrap();
+        let loaded = level::load(path.to_str().unwrap(), W, D).unwrap();
+        assert_eq!(loaded.objects.len(), level.objects.len());
+        let max_err = level
+            .heights
+            .iter()
+            .zip(&loaded.heights)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_err < 0.01, "max height error after round trip: {max_err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
