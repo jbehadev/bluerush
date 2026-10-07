@@ -1,30 +1,19 @@
 # TODO — BlueRush Game Improvements
 
-## Visual Polish
-- [x] Add ambient light so cube faces not hit by the directional light aren't pure black
-- [ ] Vary object tile height by weight (heavier = taller) so they're visually distinguishable beyond color shade
-- [ ] Add weight labels or icons on object tiles
-- [ ] Water transparency or animated surface effect using StandardMaterial properties
-- [ ] Splash particle effects when objects land in water
+## Priority 1
+- [x] Make level editor or config file of levels so they can be edited not in code. Maybe use a png and transform to 3d. *(levels/*.yaml + grayscale heightmap PNG → 3D terrain; see docs/LEVELS.md)*
+- [ ] A control for intensity of water
+- [ ] Flood button to raise water significantly
+- [ ] Reset button along side of just drain
+- [ ] A wall that is the same height as maximum terrain height and very large weight
+- [ ] Pan should use ctrl-right click
+- [ ] A way to draw blocks(walls) in a straight line and have them either very close or joined together
+- [ ] Update readme.md and Todo.md
 
-## New Gameplay Mechanics
-- [ ] Conveyor tiles that push objects in a fixed direction
-- [ ] Wind/fan force sources that apply directional pressure without water
-- [ ] Allow objects to interact before inlet is opened (step_objects currently gated behind water_flow)
+## Priority 2
+- [ ] Drain
+- [ ] Make a house that separates if hit by water
 
-## Quality of Life / UX
-- [ ] In-game toast notifications for save/load success/errors (currently console-only)
-- [ ] Grid coordinate overlay or mini-map
-- [ ] Fix brush size label to show "NxN" instead of just "N"
-- [ ] Add missing keyboard shortcuts to MANUAL.md (E for eraser, S for spring, M for heatmap, Home for camera reset)
-- [ ] Show visual feedback when file dialog is already open
 
-## Level / Challenge System
-- [ ] Predefined puzzle levels with win conditions (e.g. "get the block to the exit zone")
-- [ ] Level editor with save/load
-- [ ] Star ratings based on time or number of blocks used
-- [ ] Level select screen
-
-## Architecture / Code Health
-- [ ] Interleave step_objects and step_simulation at high sim speeds instead of batching separately
-- [ ] Remove or integrate unused TextureAssets from textures.rs
+## Priority 3
+- [ ] Pump with flow limit

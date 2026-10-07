@@ -3,27 +3,23 @@ use std::path::Path;
 
 /// Application configuration loaded from `config.yaml` at startup.
 /// If the file does not exist, a default is written so the user can discover it.
+/// Missing fields fall back to their defaults, unknown fields are ignored.
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct AppConfig {
     pub window_width: f32,
     pub window_height: f32,
-    pub grid_cols: usize,
-    pub grid_rows: usize,
-    pub tile_size: f32,
-    pub collision_destruction: bool,
+    /// The level yaml to load (see `docs/LEVELS.md`). If the file doesn't
+    /// exist, the game writes an editable template there on first run.
     pub level: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            window_width: 800.0,
-            window_height: 600.0,
-            grid_cols: 42,
-            grid_rows: 37,
-            tile_size: 16.0,
-            collision_destruction: false,
-            level: "levels/coastal-bowl.json".to_string(),
+            window_width: 1280.0,
+            window_height: 960.0,
+            level: "levels/valley.yaml".to_string(),
         }
     }
 }
