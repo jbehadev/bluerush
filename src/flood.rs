@@ -407,6 +407,34 @@ fn obj_height(weight: f32) -> f32 {
     OBJ_HEIGHT_MIN + weight_t(weight) * (OBJ_HEIGHT_MAX - OBJ_HEIGHT_MIN)
 }
 
+/// Can water this deep hold up an object this heavy? Too-shallow water (≤ WET)
+/// never floats anything. Grounded objects rest on the terrain and dam the flow.
+fn is_floating(depth: f32, weight: f32) -> bool {
+    depth > WET && weight <= depth * BUOYANCY
+}
+
+/// How readily a floating object follows the current: 1.0 for anything at or
+/// below REF_WEIGHT, falling off as 1/weight for heavier objects.
+fn mobility(weight: f32) -> f32 {
+    (REF_WEIGHT / weight).min(1.0)
+}
+
+/// Mass-weighted push-apart for two overlapping objects at `pa` / `pb`.
+/// Returns the corrections to add to each position; the lighter object moves
+/// more, and together they remove exactly the overlap. Zero if not overlapping.
+fn separate_pair(pa: Vec2, wa: f32, pb: Vec2, wb: f32) -> (Vec2, Vec2) {
+    let d = pa - pb;
+    let dist = d.length();
+    let min_dist = (obj_footprint(wa) + obj_footprint(wb)) * 0.5;
+    if dist >= min_dist || dist <= 1e-4 {
+        return (Vec2::ZERO, Vec2::ZERO);
+    }
+    let overlap = min_dist - dist;
+    let dir = d / dist;
+    let total = wa + wb;
+    (dir * (overlap * wb / total), -dir * (overlap * wa / total))
+}
+
 /// Clamp a world position to a grid cell.
 fn cell_of(pos: Vec2) -> (usize, usize) {
     let off = half();
@@ -819,8 +847,8 @@ fn build_obstacles(
     for obj in &objs {
         let (gx, gz) = cell_of(obj.pos);
         let depth = water.depth[idx(gx, gz)];
-        let grounded = obj.weight > depth * BUOYANCY; // too heavy to float here → it dams
-        if !grounded {
+        if is_floating(depth, obj.weight) {
+            // Floating objects ride the water; only grounded ones dam it.
             continue;
         }
         // Dam height tied to weight (taller blocks dam higher). Only raise cells
@@ -865,16 +893,10 @@ fn object_collision(
 
     for a in 0..n {
         for b in (a + 1)..n {
-            let d = items[a].1 - items[b].1;
-            let dist = d.length();
-            let (wa, wb) = (items[a].2, items[b].2);
-            let min_dist = (obj_footprint(wa) + obj_footprint(wb)) * 0.5;
-            if dist < min_dist && dist > 1e-4 {
-                let overlap = min_dist - dist;
-                let dir = d / dist;
-                let total = wa + wb;
-                *corr.entry(items[a].0).or_default() += dir * (overlap * wb / total);
-                *corr.entry(items[b].0).or_default() -= dir * (overlap * wa / total);
+            let (ca, cb) = separate_pair(items[a].1, items[a].2, items[b].1, items[b].2);
+            if ca != Vec2::ZERO {
+                *corr.entry(items[a].0).or_default() += ca;
+                *corr.entry(items[b].0).or_default() += cb;
             }
         }
     }
@@ -1510,15 +1532,14 @@ fn object_physics(
 
         // Vertical: float at the surface if the water can support the weight,
         // otherwise rest on the terrain.
-        let floating = depth > WET && obj.weight <= depth * BUOYANCY;
+        let floating = is_floating(depth, obj.weight);
         let target_y = if floating { surface - DRAFT } else { t[i] };
         obj.y += (target_y - obj.y) * VERT_EASE;
 
         // Horizontal: a floating object drifts toward the local current's speed,
         // scaled by mobility — light objects match the flow, heavy ones lag.
         if floating {
-            let mobility = (REF_WEIGHT / obj.weight).min(1.0);
-            let target_vel = water.flow[i] * FLOW_TO_SPEED * mobility;
+            let target_vel = water.flow[i] * FLOW_TO_SPEED * mobility(obj.weight);
             let new_vel = obj.vel.lerp(target_vel, FLOW_EASE);
             obj.vel = new_vel;
         } else {
@@ -1759,76 +1780,13 @@ fn step_flow(terrain: Res<Terrain>, obstacle: Res<Obstacle>, paused: Res<Paused>
     if paused.0 {
         return;
     }
-    const NB: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-    let t = &terrain.0;
-    let obs = &obstacle.0;
     // Effective floor = terrain raised by any grounded-object obstacle.
-    let floor = |i: usize| t[i] + obs[i];
+    let floor: Vec<f32> = terrain.0.iter().zip(&obstacle.0).map(|(t, o)| t + o).collect();
 
     // Accumulate the net water movement (current) per cell across all iterations.
     let mut flow = vec![Vec2::ZERO; W * D];
-
     for _ in 0..FLOW_ITERS {
-        let d = water.depth.clone();
-        let mut delta = vec![0.0f32; W * D];
-
-        for z in 0..D {
-            for x in 0..W {
-                let i = idx(x, z);
-                let avail = d[i];
-                if avail <= 0.0 {
-                    continue;
-                }
-                let floor_i = floor(i);
-                let si = floor_i + d[i];
-
-                let mut lower: [(usize, f32, Vec2); 4] = [(0, 0.0, Vec2::ZERO); 4];
-                let mut count = 0;
-                let mut total_gap = 0.0;
-                for (dx, dz) in NB {
-                    let nx = x as i32 + dx;
-                    let nz = z as i32 + dz;
-                    if nx < 0 || nz < 0 || nx >= W as i32 || nz >= D as i32 {
-                        continue;
-                    }
-                    let j = idx(nx as usize, nz as usize);
-                    let fj = floor(j);
-                    let sj = fj + d[j];
-                    // Weir flux: water can only move over the higher of the two
-                    // floors (the "sill"). The drivable head is the surface above
-                    // that sill, so a tall obstacle dams the flow until water backs
-                    // up to its crest, then spills only the thin overtopping layer.
-                    // (The old `si - sj` gap dumped the whole column over a block in
-                    // one step — draining the crest to a dry dip and surging below.)
-                    let sill = floor_i.max(fj);
-                    let head_i = (si - sill).max(0.0);
-                    let head_j = (sj - sill).max(0.0);
-                    if head_i > head_j {
-                        let gap = head_i - head_j;
-                        lower[count] = (j, gap, Vec2::new(dx as f32, dz as f32));
-                        total_gap += gap;
-                        count += 1;
-                    }
-                }
-                if count == 0 {
-                    continue;
-                }
-
-                // Move ~half each gap; scale down so total outflow ≤ avail.
-                let desired = total_gap * 0.5 * FLOW_RATE;
-                let scale = if desired > avail { avail / desired } else { 1.0 };
-                for &(j, gap, dir) in lower.iter().take(count) {
-                    let out = gap * 0.5 * FLOW_RATE * scale;
-                    delta[i] -= out;
-                    delta[j] += out;
-                    flow[i] += dir * out; // water leaving cell i in this direction
-                }
-            }
-        }
-
-        for i in 0..W * D {
-            water.depth[i] = (water.depth[i] + delta[i]).max(0.0);
-        }
+        flow_iteration(&mut water.depth, &floor, W, D, &mut flow);
     }
 
     // Outflow: water reaching the low front edge runs off, so the channel keeps
@@ -1838,6 +1796,74 @@ fn step_flow(terrain: Res<Terrain>, obstacle: Res<Obstacle>, paused: Res<Paused>
     }
 
     water.flow = flow;
+}
+
+/// One pass of the flow on a `w` × `d` grid: every column sends water to its
+/// lower neighbours, all transfers applied at once (a delta buffer), so total
+/// water is conserved. `flow` accumulates the water each cell sent and which
+/// way. Pure (no Bevy resources) so tests can run it on a tiny grid.
+fn flow_iteration(depth: &mut [f32], floor: &[f32], w: usize, d: usize, flow: &mut [Vec2]) {
+    const NB: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    let old = depth.to_vec();
+    let mut delta = vec![0.0f32; w * d];
+
+    for z in 0..d {
+        for x in 0..w {
+            let i = z * w + x;
+            let avail = old[i];
+            if avail <= 0.0 {
+                continue;
+            }
+            let floor_i = floor[i];
+            let si = floor_i + old[i];
+
+            let mut lower: [(usize, f32, Vec2); 4] = [(0, 0.0, Vec2::ZERO); 4];
+            let mut count = 0;
+            let mut total_gap = 0.0;
+            for (dx, dz) in NB {
+                let nx = x as i32 + dx;
+                let nz = z as i32 + dz;
+                if nx < 0 || nz < 0 || nx >= w as i32 || nz >= d as i32 {
+                    continue;
+                }
+                let j = nz as usize * w + nx as usize;
+                let fj = floor[j];
+                let sj = fj + old[j];
+                // Weir flux: water can only move over the higher of the two
+                // floors (the "sill"). The drivable head is the surface above
+                // that sill, so a tall obstacle dams the flow until water backs
+                // up to its crest, then spills only the thin overtopping layer.
+                // (The old `si - sj` gap dumped the whole column over a block in
+                // one step — draining the crest to a dry dip and surging below.)
+                let sill = floor_i.max(fj);
+                let head_i = (si - sill).max(0.0);
+                let head_j = (sj - sill).max(0.0);
+                if head_i > head_j {
+                    let gap = head_i - head_j;
+                    lower[count] = (j, gap, Vec2::new(dx as f32, dz as f32));
+                    total_gap += gap;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+
+            // Move ~half each gap; scale down so total outflow ≤ avail.
+            let desired = total_gap * 0.5 * FLOW_RATE;
+            let scale = if desired > avail { avail / desired } else { 1.0 };
+            for &(j, gap, dir) in lower.iter().take(count) {
+                let out = gap * 0.5 * FLOW_RATE * scale;
+                delta[i] -= out;
+                delta[j] += out;
+                flow[i] += dir * out; // water leaving cell i in this direction
+            }
+        }
+    }
+
+    for i in 0..w * d {
+        depth[i] = (depth[i] + delta[i]).max(0.0);
+    }
 }
 
 /// Advance the visual-only ripple field (a damped wave equation) on wet cells.
@@ -2025,6 +2051,143 @@ mod tests {
         // Degenerate (zero-length) wall behaves like a point.
         let (d, _) = closest_on_segment(Vec2::new(3.0, 4.0), a, a);
         assert!((d - 5.0).abs() < 1e-5);
+    }
+
+    // --- Water flow -------------------------------------------------------
+
+    /// Run `n` flow iterations on a `w` × `d` grid; returns the accumulated flow.
+    fn run_flow(depth: &mut [f32], floor: &[f32], w: usize, d: usize, n: usize) -> Vec<Vec2> {
+        let mut flow = vec![Vec2::ZERO; w * d];
+        for _ in 0..n {
+            flow_iteration(depth, floor, w, d, &mut flow);
+        }
+        flow
+    }
+
+    fn total(depth: &[f32]) -> f32 {
+        depth.iter().sum()
+    }
+
+    #[test]
+    fn flow_conserves_water() {
+        // Uneven floor and uneven water on a 4×3 grid: water moves, none is lost.
+        let floor = [0.0, 1.0, 2.0, 0.5, 3.0, 0.0, 1.5, 2.0, 0.0, 0.0, 4.0, 1.0];
+        let mut depth = [5.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.5];
+        let before = total(&depth);
+        run_flow(&mut depth, &floor, 4, 3, 50);
+        assert!((total(&depth) - before).abs() < 1e-3, "water total changed");
+    }
+
+    #[test]
+    fn flow_never_makes_negative_depth() {
+        // A thin film next to a deep drop can't send more than it holds.
+        let floor = [10.0, 0.0, 0.0];
+        let mut depth = [0.01, 0.0, 0.0];
+        run_flow(&mut depth, &floor, 3, 1, 20);
+        assert!(depth.iter().all(|&h| h >= 0.0));
+    }
+
+    #[test]
+    fn flow_levels_out_on_flat_ground() {
+        // A column dropped in the middle of a flat 5-cell trough spreads evenly.
+        let floor = [0.0; 5];
+        let mut depth = [0.0, 0.0, 10.0, 0.0, 0.0];
+        run_flow(&mut depth, &floor, 5, 1, 200);
+        for h in depth {
+            assert!((h - 2.0).abs() < 0.05, "depth {h} not ~2.0");
+        }
+    }
+
+    #[test]
+    fn flow_runs_downhill_and_reports_current() {
+        // Water on the high end of a slope ends up mostly at the low end, and
+        // the recorded current at the top cell points downhill (+x).
+        let floor = [3.0, 2.0, 1.0, 0.0];
+        let mut depth = [4.0, 0.0, 0.0, 0.0];
+        let flow = run_flow(&mut depth, &floor, 4, 1, 100);
+        assert!(depth[3] > depth[0], "low end {} vs high end {}", depth[3], depth[0]);
+        assert!(flow[0].x > 0.0 && flow[0].y == 0.0);
+    }
+
+    #[test]
+    fn obstacle_dams_until_water_reaches_its_crest() {
+        // Floor: [pool][wall 5 high][empty]. With the pool surface below the
+        // crest, nothing gets past the wall.
+        let floor = [0.0, 5.0, 0.0];
+        let mut depth = [4.0, 0.0, 0.0];
+        run_flow(&mut depth, &floor, 3, 1, 100);
+        assert_eq!(depth[2], 0.0, "water leaked past the wall");
+        assert!((depth[0] - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn obstacle_spills_only_the_overtopping_layer() {
+        // Pool surface at 7 against a 5-high wall: only the ~2 units above the
+        // crest spill over; the pool keeps (about) the 5 units below it.
+        let floor = [0.0, 5.0, 0.0];
+        let mut depth = [7.0, 0.0, 0.0];
+        run_flow(&mut depth, &floor, 3, 1, 500);
+        assert!(depth[2] > 0.5, "nothing spilled over: {:?}", depth);
+        assert!(depth[0] >= 5.0 - 1e-3, "pool drained below the crest: {:?}", depth);
+    }
+
+    #[test]
+    fn crest_water_is_not_dumped_in_one_step() {
+        // Regression (session 19): water sitting on top of a block used to see
+        // the block's full height as its "gap" and drain to a dry dip in one
+        // step. The weir rule only moves the head above the crest, gradually.
+        let floor = [0.0, 5.0, 0.0];
+        let mut depth = [0.0, 1.0, 0.0];
+        run_flow(&mut depth, &floor, 3, 1, 1);
+        assert!(depth[1] >= 0.5, "crest drained to {} in one step", depth[1]);
+    }
+
+    // --- Buoyancy ----------------------------------------------------------
+
+    #[test]
+    fn light_object_floats_in_deep_water() {
+        assert!(is_floating(5.0, 200.0));
+    }
+
+    #[test]
+    fn heavy_object_grounds_in_shallow_water() {
+        // 5000 kg needs depth ≥ 5000 / BUOYANCY to lift off.
+        assert!(!is_floating(1.0, 5000.0));
+        assert!(is_floating(5000.0 / BUOYANCY + 0.1, 5000.0));
+    }
+
+    #[test]
+    fn nothing_floats_on_a_dry_cell() {
+        assert!(!is_floating(WET, 1.0));
+        assert!(!is_floating(0.0, 1.0));
+    }
+
+    #[test]
+    fn heavier_objects_are_less_mobile() {
+        assert_eq!(mobility(REF_WEIGHT / 2.0), 1.0, "mobility is capped at 1");
+        assert_eq!(mobility(REF_WEIGHT), 1.0);
+        assert!(mobility(500.0) > mobility(5000.0));
+    }
+
+    // --- Collision ---------------------------------------------------------
+
+    #[test]
+    fn separate_pair_shoves_the_lighter_object_more() {
+        let (wa, wb) = (200.0, 2000.0);
+        let (pa, pb) = (Vec2::new(0.0, 0.0), Vec2::new(5.0, 0.0));
+        let (ca, cb) = separate_pair(pa, wa, pb, wb);
+        assert!(ca.length() > cb.length());
+        // Pushed in opposite directions along the line between them.
+        assert!(ca.x < 0.0 && cb.x > 0.0);
+        // Afterwards they're exactly touching: overlap fully removed.
+        let min_dist = (obj_footprint(wa) + obj_footprint(wb)) * 0.5;
+        assert!(((pa + ca).distance(pb + cb) - min_dist).abs() < 1e-4);
+    }
+
+    #[test]
+    fn separate_pair_ignores_objects_that_do_not_touch() {
+        let far = Vec2::new(100.0, 0.0);
+        assert_eq!(separate_pair(Vec2::ZERO, 500.0, far, 500.0), (Vec2::ZERO, Vec2::ZERO));
     }
 
     /// Regenerate the shipped valley level files from the procedural terrain:
