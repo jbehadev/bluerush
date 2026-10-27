@@ -16,3 +16,4 @@ objects:
 - x: 0.33
   z: 0.69
   weight: 2000.0
+scenery: [trees, ruins]

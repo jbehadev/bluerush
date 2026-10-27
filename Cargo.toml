@@ -15,6 +15,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [profile.dev.package."*"]
 opt-level = 3
 
-# Keep your own code unoptimized for fast incremental compile + good debug info
+# Light optimisation for our own code: still quick to compile, but several times
+# faster at runtime — scenery placement runs seconds of water sim at level load
+# (`flood::predict_wet`), which takes ~1s+ unoptimised and ~0.2s at opt-level 1.
 [profile.dev]
-opt-level = 0
+opt-level = 1

@@ -58,7 +58,21 @@ source:                 # where water enters the map
 objects:                # starting blocks (optional)
   - { x: 0.71, z: 0.50, weight: 4000.0 }   # heavy — dams the stream
   - { x: 0.31, z: 0.34, weight: 150.0 }    # light — washes away
+scenery: [trees, city]  # scenery sets (optional — default [trees], [] = bare land)
 ```
+
+**Scenery sets** dress the land automatically from the terrain shape — you
+don't place them by hand:
+
+| Set | Where it goes |
+|-----|---------------|
+| `trees` | Groves on the grassland (above the sand line, gentle slopes); pines take over higher up. |
+| `city` | One grid town on the flattest, lowest dry ground — a floodplain town. Skipped if the level has no room for at least a handful of buildings. |
+| `ruins` | Up to four broken foundations with columns and rubble, spread over gentle hills. |
+
+The same terrain always gives the same layout. The **SCENERY** buttons in the
+toolbar toggle each set live. For now scenery is decoration — water flows
+through it.
 
 All positions are **fractions of the map (0.0–1.0)**, so a level is
 independent of both the image size and the simulation grid resolution.
