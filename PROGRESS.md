@@ -495,7 +495,34 @@ assets/shaders/water.wgsl — custom water material
   `use super::*` reaches private fns; small test helpers (`run_flow`, `total`); a test that never
   failed may not test anything.
 
+### Session 25 (Bevy 0.18 → 0.19)
+
+- **Process** — bump `bevy` in Cargo.toml, `cargo build`, group the errors by kind (15 errors → 4
+  distinct changes), fix, rebuild until clean; then `cargo test` (19 pass) and `cargo run`.
+- **API changes hit:**
+  - `TextFont::font_size` is a `FontSize` enum → `FontSize::Px(11.0)` (also `Vw`, `Vh`, …).
+  - `Atmosphere` / `ScatteringMedium` moved `bevy::pbr` → `bevy::light` (`bevy::light::atmosphere`).
+  - `DirectionalLight::shadows_enabled` → `shadow_maps_enabled` (0.19 added contact shadows).
+  - `Assets::get_mut` returns an `AssetMut` guard (like `Mut<T>`), so `let Some(mut mesh) = …`.
+  - `Atmosphere::earthlike` → `Atmosphere::earth`, **and the atmosphere is now its own "planet"
+    entity** (auto-placed one Earth radius below the origin); cameras opt in with
+    `AtmosphereSettings`. This one *compiled* with just the rename — only reading the source
+    showed it had to move off the camera.
+- **Where to look** — the downloaded crate source in `~/.cargo/registry/src/*/bevy_*-0.19.1/` is
+  the ground truth: doc comments, `pub use` re-exports, constructor names. Shader `#import`s
+  (`water.wgsl`) aren't compile-checked — verified each module/function exists in 0.19.1.
+- **Found, not caused by the upgrade:** the Waterfall level shows no water on the cliff face. The
+  #32 shader fades near-vertical water (`smoothstep(0.3, 0.65, world_normal.y)` in `water.wgsl`)
+  to hide sheets stretched up block sides — it can't tell a waterfall apart. Confirmed identical on
+  main (0.18) by running it from a temp worktree. Fix after the upgrades.
+- **Gotcha** — launching the built binary directly (not `cargo run`) makes Bevy look for `assets/`
+  next to the executable → shader missing → invisible water. Always use `cargo run`.
+- **Next blocker** — Bevy 0.20 requires Rust 1.97.1 (we have 1.95 via Homebrew).
+
 ## Where We Left Off (current)
+
+**Session 25 (`upgrade/bevy-0.19`)** — on Bevy 0.19.1. Next: Rust toolchain → 1.97.1, then Bevy
+0.20, then fix the waterfall fade.
 
 **Session 24 (`test/sim-helpers`)** — sim helpers extracted + unit-tested (19 tests). Next up is
 the Bevy upgrade: 0.18 → 0.19 first.
@@ -535,7 +562,10 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 - ~~**Config + cleanup**~~ Done (session 23).
 - ~~**Tests**~~ Done (session 24). Not yet covered: `build_obstacles` footprint mask, wall
   collision — candidates if the upgrade touches them.
-- **Bevy upgrade (next)** — 0.18 → 0.19 (build/test/run), then 0.19 → 0.20 (use 0.20.1+ if released).
+- **Waterfall fade bug** — keep steep water visible where the current is fast (waterfall), fade it
+  only where it's still (sheet against a block); maybe a white-water tint on the fall.
+- **Bevy upgrade (next)** — ~~0.18 → 0.19~~ done (session 25); 0.19 → 0.20 needs Rust 1.97.1 first
+  (use 0.20.1+ if released).
   Known 0.20 change: pointer events flattened (`Pointer<Press>` → `PointerPress`).
 - **Object destruction** — a strong enough current sweeps away or breaks objects.
 - ~~**Levels** — author terrain heightmaps; save/load.~~ Done (session 20): PNG heightmap +
