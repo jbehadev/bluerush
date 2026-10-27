@@ -1,20 +1,20 @@
 # BlueRush
 
-A 2D/3D flood simulation game built with Rust and the [Bevy](https://bevyengine.org/) game engine. Water rushes in, spreads via pressure diffusion, and carries objects in its path. Place blocks of different weights and watch physics play out.
+A flood simulation game built with Rust and the [Bevy](https://bevyengine.org/) game engine. Water flows over a heightfield terrain, pools, and carries objects in its path. Place blocks of different weights and watch them get swept away, pile up, or dam the stream.
 
 ## Gameplay
 
-- **Place objects** of varying weight (200–5000 kg) on the grid
-- **Activate water** to flood the grid from the bottom
-- **Watch** as lighter objects float and get carried; heavier ones act as barriers
-- **Place springs** to create localized water sources
-- **Save and load** your layouts to experiment freely
+- **Place blocks** of varying weight — light ones get carried by the current, heavy ones dam and divert it
+- **Draw walls** by click-and-drag to channel the flow
+- **Pour water** anywhere, or trigger a FLOOD! surge
+- **Pick a wave pattern** for the source (Flood, Sine, Random, Off)
+- **Load levels** from `levels/*.yaml` + PNG heightmaps (see [docs/LEVELS.md](docs/LEVELS.md))
 
 For full controls and mechanics, see the **[Manual](MANUAL.md)**.
 
 ## Screenshots
 
-> 3D isometric view with pressure heatmap, hover cursor, and UI toolbar
+> Orbit-camera view of a stream bed with depth-shaded water and a UI panel
 
 ## Building & Running
 
@@ -41,11 +41,13 @@ cargo test
 
 ```
 src/
-  main.rs        — App setup, plugin registration
-  grid.rs        — GridPlugin, all UI/rendering/input systems, 3D camera, gizmos
-  simulation.rs  — Cell/Grid types, step_simulation, step_objects, build_depth_pressure
-  textures.rs    — TexturesPlugin, programmatic froth textures
-  persistence.rs — Save/load grid to JSON files
+  main.rs   — App setup, window, plugin registration
+  config.rs — AppConfig loaded from config.yaml (window size, level path)
+  flood.rs  — FloodPlugin: terrain, water sim, objects, walls, UI, camera, input
+  level.rs  — Level yaml + PNG heightmap loading
+levels/     — Shipped levels (*.yaml + *.png heightmaps)
+assets/     — shaders/water.wgsl (custom water material)
+docs/       — WATER_FLOW.md (how the sim works), LEVELS.md (level format)
 ```
 
 ## Tech Stack
@@ -53,9 +55,9 @@ src/
 | Crate | Purpose |
 |-------|---------|
 | [bevy 0.18](https://bevyengine.org/) | Game engine (ECS, rendering, input) |
-| [rand 0.8](https://crates.io/crates/rand) | Random conflict resolution in object physics |
-| [serde](https://serde.rs/) + serde_json | Grid serialization for save/load |
-| [rfd 0.15](https://crates.io/crates/rfd) | Native file dialogs (save/open) |
+| [rand 0.8](https://crates.io/crates/rand) | Random wave pattern |
+| [serde](https://serde.rs/) + serde_yaml | Config and level files |
+| [image 0.25](https://crates.io/crates/image) | PNG heightmap decode/encode |
 
 ## License
 
