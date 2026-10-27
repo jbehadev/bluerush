@@ -540,7 +540,35 @@ assets/shaders/water.wgsl — custom water material
 - **Lesson across both upgrades** — the compiler finds renames; behaviour moves (atmosphere entity)
   and runtime-compiled assets (shaders) need reading the source/migration guide and running.
 
+### Session 26 (Waterfalls visible)
+
+- **Diagnosis by measurement** — a throwaway ignored test loaded the Waterfall level and ran
+  `flow_iteration` to steady state, printing each row: the cliff drops 62 units in *one* 4-unit
+  cell, with only ~0.2 of water on it. So the fall's surface lay on the rock (hidden, ~0
+  thickness for the shore fade) *and* was faded as too steep. Shader-only tweaks couldn't fix it.
+- **Tried + dropped: a separate curtain mesh** — read as a flat white wall, with a "piano key"
+  staircase along diagonal lips (one strip per cell).
+- **Kept: reuse the water surface** (continuous, already animated):
+  - `fall_factor(normal, current)` — steep × fast × flowing downhill (the normal's xz points
+    downhill). Fast water piling *up* a block's face is uphill → not a fall.
+  - `uphill_cell` gate — only falls fed by wet ground; stops the sheet from a dry block top to the
+    fast river behind it turning white (the shader can't see neighbours, so this is per vertex on
+    the CPU and passed in `UV_1` — which also removed a Rust/WESL duplicate of the rule).
+  - Fall vertices pushed `FALL_STANDOFF` *downstream* (not along the normal — normals flip along a
+    stair-stepped edge and folded the sheet).
+  - Shader: skip both fades on falls, white-water ribbons scrolling down, ripples off (xz noise
+    smears into stripes on vertical faces), opacity × lip depth (`UV_1.y`) so thin films are wisps.
+  - **Anti-aliasing with `fwidth`** — zoomed out, a pixel spans several streaks and noise aliases
+    into moiré/"wood grain"; each noise octave fades to its average once `fwidth(across)` says a
+    pixel covers too much of it.
+- **Process** — screenshots from several angles via the throwaway Screenshot system, scripted in
+  `/tmp/wf_shoot.sh` (inject → run → restore). The user's default zoomed-out view caught the
+  aliasing + solid-wall problems that close-ups missed — always check the default camera too.
+
 ## Where We Left Off (current)
+
+**Session 26 (`fix/waterfall-visible`)** — waterfalls render as white-water curtains; on Bevy
+0.20 / Rust 1.99.1.
 
 **Session 25 (`upgrade/bevy-0.19` → `upgrade/bevy-0.20`)** — on Bevy 0.20.0 / Rust 1.99.1. Next:
 fix the waterfall fade.
@@ -583,8 +611,7 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 - ~~**Config + cleanup**~~ Done (session 23).
 - ~~**Tests**~~ Done (session 24). Not yet covered: `build_obstacles` footprint mask, wall
   collision — candidates if the upgrade touches them.
-- **Waterfall fade bug (next)** — keep steep water visible where the current is fast (waterfall), fade it
-  only where it's still (sheet against a block); maybe a white-water tint on the fall.
+- ~~**Waterfall fade bug**~~ Done (session 26). Possible polish: splash/mist at the base of falls.
 - ~~**Bevy upgrade**~~ Done (session 25): 0.18 → 0.19 → 0.20. Bump to 0.20.1 when released.
 - **Buttons → observers (optional, learning)** — rewrite the panel handlers as `On<Activate>`
   observers, the 0.20-native pattern.

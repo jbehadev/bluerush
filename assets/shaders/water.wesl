@@ -95,6 +95,20 @@ fn flowing_slope(p: vec2<f32>, flow: vec2<f32>, t: f32) -> vec2<f32> {
     return mix(s0, s1, w1);
 }
 
+// --- Waterfalls -----------------------------------------------------------
+
+// Vertical streaks of white water that slide down the fall. `across` runs
+// sideways along the lip; sampling at height + time makes the pattern move down.
+// `px` is how many world units one screen pixel covers sideways (from fwidth):
+// once a pixel spans most of a streak, the noise would alias into moiré, so each
+// octave fades to its average (0) before that happens.
+fn fall_streaks(across: f32, height: f32, t: f32, px: f32) -> f32 {
+    let k0 = 1.0 - smoothstep(0.25, 0.6, px * 0.35);
+    let k1 = 1.0 - smoothstep(0.25, 0.6, px * 0.9);
+    let s = k0 * gnoise(vec2(across * 0.35, height * 0.04 + t * 1.6));
+    return s + k1 * 0.5 * gnoise(vec2(across * 0.9 + 17.3, height * 0.09 + t * 2.7));
+}
+
 // --- Fragment --------------------------------------------------------------
 
 @fragment
@@ -104,11 +118,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // 1. Ripples. The mesh's UV holds the current in world units / second.
     var flow = in.uv;
     let speed = length(flow);
+    // How much this pixel is a waterfall (0..1), worked out per vertex on the
+    // CPU — it needs neighbouring cells, which a shader can't see.
+    let fall = in.uv_b.x;
+    let volume = in.uv_b.y; // how much water is going over: 0 = thin film, 1 = full fall
     if speed > 25.0 {
         flow *= 25.0 / speed; // cap how far a ripple can be dragged per cycle
     }
     // Fast water is choppier than a still pool.
-    let strength = water.params.z * (0.6 + min(speed / 25.0, 1.4));
+    // Falls get no ripples: on a near-vertical face the xz-based noise smears into
+    // stripes, and the white-water streaks below carry the motion instead.
+    let strength = water.params.z * (0.6 + min(speed / 25.0, 1.4)) * (1.0 - fall);
     let slope = flowing_slope(in.world_position.xz, flow, globals.time);
     var n = normalize(pbr_input.world_normal + vec3(-slope.x, 0.0, -slope.y) * strength);
     // A steep ripple can tilt the reflection below the horizon, where it would
@@ -146,6 +166,23 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     alpha *= smoothstep(0.0, water.params.y, thickness);
     alpha *= smoothstep(0.3, 0.65, pbr_input.world_normal.y);
 
+    // 3b. Waterfalls skip both fades: a fall is steep and its film is thin, but
+    //     it's churned to white water you can't see through. Blend toward foam
+    //     with streaks sliding downward.
+    var color = body.rgb;
+    if fall > 0.0 {
+        // Sideways coordinate along the lip. A fixed world-space mix (not the
+        // current's direction, which swirls at the ends of a fall and draws
+        // contour lines); the 0.618 keeps it varying along x-, z- and 45° lips.
+        let across = in.world_position.x + 0.618 * in.world_position.z;
+        let streak = fall_streaks(across, in.world_position.y, globals.time, fwidth(across));
+        let foam = vec3(0.80, 0.86, 0.88) * (0.85 + 0.15 * streak);
+        color = mix(color, foam, fall);
+        // Ribbons with gaps between them; a thin film is just a few wisps.
+        let ribbons = mix(0.3, 0.95, smoothstep(-0.6, 0.8, streak));
+        alpha = mix(alpha, ribbons * mix(0.15, 1.0, volume), fall);
+    }
+
     // 4. Light it in two passes, because real water's colour and its shine
     //    react to ripples differently:
     //    * BODY — the colour comes from light scattered *inside* the water, so it
@@ -155,7 +192,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     //    * SHINE — the sky reflection and sun glints DO follow every ripple. Lit
     //      with the rippled normal and a black base colour (reflection only).
     var body_input = pbr_input;
-    body_input.material.base_color = vec4(body.rgb, alpha);
+    body_input.material.base_color = vec4(color, alpha);
     body_input.material.reflectance = vec3(0.0);
     let body_lit = apply_pbr_lighting(body_input);
 
