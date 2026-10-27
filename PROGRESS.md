@@ -519,10 +519,31 @@ assets/shaders/water.wgsl — custom water material
   next to the executable → shader missing → invisible water. Always use `cargo run`.
 - **Next blocker** — Bevy 0.20 requires Rust 1.97.1 (we have 1.95 via Homebrew).
 
+### Session 25b (Bevy 0.19 → 0.20)
+
+- **Toolchain** — Bevy 0.20 needs Rust ≥ 1.97.1: `brew upgrade rust` 1.95 → 1.99.1 (pulled in
+  `openssl@4`, newer `ca-certificates`). Rebuilt 0.19 on the new compiler first so toolchain and
+  Bevy changes weren't mixed up. (Xcode CLT is outdated for macOS 27 — blocks some brew source
+  builds, didn't block rust.)
+- **UI buttons reworked** — `Button` is now the headless `bevy::ui_widgets::Button`; `Interaction`
+  is deprecated in favour of `bevy::ui::Pressed` (inserted while held) + picking's `Hovered`, with
+  an `Activate` event on click. Handlers now query `Added<Pressed>` (same moment as the old
+  `Interaction::Pressed`): marker buttons `Query<(), (Added<Pressed>, With<X>)>` + `!q.is_empty()`,
+  data buttons `Query<&WeightButton, Added<Pressed>>`. (Observers on `On<Activate>` are the more
+  idiomatic future style.)
+- **Shaders are WESL now** — naga_oil is gone; `water.wgsl` → `water.wesl`:
+  `#import a::b` → `import a::b;` (first in file), module paths follow crate file layout
+  (`bevy_pbr::forward_io` → `bevy_pbr::render::forward_io`, `prepass_utils` → `prepass::utils`),
+  `#ifdef X … #endif` → `@if(X)` on an import/statement/block, `#{MATERIAL_BIND_GROUP}` →
+  `constants::MATERIAL_BIND_GROUP` (materials moved to bind group 3). Compiled fine in Rust —
+  only a runtime check would have shown it.
+- **Lesson across both upgrades** — the compiler finds renames; behaviour moves (atmosphere entity)
+  and runtime-compiled assets (shaders) need reading the source/migration guide and running.
+
 ## Where We Left Off (current)
 
-**Session 25 (`upgrade/bevy-0.19`)** — on Bevy 0.19.1. Next: Rust toolchain → 1.97.1, then Bevy
-0.20, then fix the waterfall fade.
+**Session 25 (`upgrade/bevy-0.19` → `upgrade/bevy-0.20`)** — on Bevy 0.20.0 / Rust 1.99.1. Next:
+fix the waterfall fade.
 
 **Session 24 (`test/sim-helpers`)** — sim helpers extracted + unit-tested (19 tests). Next up is
 the Bevy upgrade: 0.18 → 0.19 first.
@@ -562,10 +583,11 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 - ~~**Config + cleanup**~~ Done (session 23).
 - ~~**Tests**~~ Done (session 24). Not yet covered: `build_obstacles` footprint mask, wall
   collision — candidates if the upgrade touches them.
-- **Waterfall fade bug** — keep steep water visible where the current is fast (waterfall), fade it
+- **Waterfall fade bug (next)** — keep steep water visible where the current is fast (waterfall), fade it
   only where it's still (sheet against a block); maybe a white-water tint on the fall.
-- **Bevy upgrade (next)** — ~~0.18 → 0.19~~ done (session 25); 0.19 → 0.20 needs Rust 1.97.1 first
-  (use 0.20.1+ if released).
+- ~~**Bevy upgrade**~~ Done (session 25): 0.18 → 0.19 → 0.20. Bump to 0.20.1 when released.
+- **Buttons → observers (optional, learning)** — rewrite the panel handlers as `On<Activate>`
+  observers, the 0.20-native pattern.
   Known 0.20 change: pointer events flattened (`Pointer<Press>` → `PointerPress`).
 - **Object destruction** — a strong enough current sweeps away or breaks objects.
 - ~~**Levels** — author terrain heightmaps; save/load.~~ Done (session 20): PNG heightmap +

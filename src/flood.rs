@@ -25,6 +25,8 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
+use bevy::ui::Pressed;
+use bevy::ui_widgets::Button;
 use std::collections::HashMap;
 
 use crate::level::{self, LoadedLevel, ObjectConfig, SourceConfig};
@@ -85,7 +87,7 @@ const RIPPLE_DAMP: f32 = 0.96;
 const MAX_RIPPLE: f32 = 4.0;
 const RIPPLE_FADE: f32 = 5.0; // ripples fade out in water shallower than this
 
-// Water look (see assets/shaders/water.wgsl).
+// Water look (see assets/shaders/water.wesl).
 const WATER_ABSORPTION: f32 = 0.10; // murkiness per world unit of water the view ray crosses
 const SHORE_FADE: f32 = 1.5; // water this thin (world units) fades into the terrain
 const RIPPLE_STRENGTH: f32 = 0.12; // how far ripples tilt the surface normal
@@ -245,7 +247,7 @@ struct WaterExt {
     settings: WaterSettings,
 }
 
-/// GPU-side layout must match `struct WaterSettings` in water.wgsl.
+/// GPU-side layout must match `struct WaterSettings` in water.wesl.
 #[derive(ShaderType, Debug, Clone)]
 struct WaterSettings {
     shallow_color: Vec4,
@@ -256,7 +258,7 @@ struct WaterSettings {
 
 impl MaterialExtension for WaterExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/water.wgsl".into()
+        "shaders/water.wesl".into()
     }
 }
 
@@ -1282,13 +1284,11 @@ fn toggle_pause(keys: Res<ButtonInput<KeyCode>>, mut paused: ResMut<Paused>) {
 }
 
 fn handle_pause_button(
-    q: Query<&Interaction, (Changed<Interaction>, With<PauseButton>)>,
+    q: Query<(), (Added<Pressed>, With<PauseButton>)>,
     mut paused: ResMut<Paused>,
 ) {
-    for interaction in &q {
-        if *interaction == Interaction::Pressed {
-            paused.0 = !paused.0;
-        }
+    if !q.is_empty() {
+        paused.0 = !paused.0;
     }
 }
 
@@ -1314,49 +1314,41 @@ fn update_pause_button(
 }
 
 fn handle_weight_buttons(
-    q: Query<(&Interaction, &WeightButton), Changed<Interaction>>,
+    q: Query<&WeightButton, Added<Pressed>>,
     mut tool: ResMut<SelectedTool>,
 ) {
-    for (interaction, w) in &q {
-        if *interaction == Interaction::Pressed {
-            *tool = SelectedTool::Object(w.0);
-        }
+    for w in &q {
+        *tool = SelectedTool::Object(w.0);
     }
 }
 
 fn handle_pour_button(
-    q: Query<&Interaction, (Changed<Interaction>, With<PourButton>)>,
+    q: Query<(), (Added<Pressed>, With<PourButton>)>,
     mut tool: ResMut<SelectedTool>,
 ) {
-    for interaction in &q {
-        if *interaction == Interaction::Pressed {
-            *tool = SelectedTool::Pour;
-        }
+    if !q.is_empty() {
+        *tool = SelectedTool::Pour;
     }
 }
 
 fn handle_erase_button(
-    q: Query<&Interaction, (Changed<Interaction>, With<EraseButton>)>,
+    q: Query<(), (Added<Pressed>, With<EraseButton>)>,
     mut tool: ResMut<SelectedTool>,
 ) {
-    for interaction in &q {
-        if *interaction == Interaction::Pressed {
-            *tool = SelectedTool::Erase;
-        }
+    if !q.is_empty() {
+        *tool = SelectedTool::Erase;
     }
 }
 
 /// Pick a wave pattern from the panel, or press W to cycle
 /// Flood → Sine → Random → Off.
 fn handle_wave_buttons(
-    q: Query<(&Interaction, &WaveButton), Changed<Interaction>>,
+    q: Query<&WaveButton, Added<Pressed>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut wave: ResMut<Wave>,
 ) {
-    for (interaction, b) in &q {
-        if *interaction == Interaction::Pressed {
-            wave.pattern = b.0;
-        }
+    for b in &q {
+        wave.pattern = b.0;
     }
     if keys.just_pressed(KeyCode::KeyW) {
         wave.pattern = wave.pattern.next();
@@ -1369,11 +1361,11 @@ const FLOOD_ACTIVE: Color = Color::srgb(0.30, 0.65, 1.00);
 /// The FLOOD! button (or F) starts a surge. Pressing again mid-surge restarts
 /// the timer rather than stacking.
 fn handle_flood_button(
-    q: Query<&Interaction, (Changed<Interaction>, With<FloodButton>)>,
+    q: Query<(), (Added<Pressed>, With<FloodButton>)>,
     keys: Res<ButtonInput<KeyCode>>,
     mut surge: ResMut<Surge>,
 ) {
-    let clicked = q.iter().any(|i| *i == Interaction::Pressed);
+    let clicked = !q.is_empty();
     if clicked || keys.just_pressed(KeyCode::KeyF) {
         surge.remaining = SURGE_SECS;
     }
@@ -1391,31 +1383,27 @@ fn update_flood_button(surge: Res<Surge>, mut q: Query<&mut BackgroundColor, Wit
 
 /// Clicking the dropdown button opens/closes the level list.
 fn handle_level_dropdown(
-    q: Query<&Interaction, (Changed<Interaction>, With<LevelDropdownButton>)>,
+    q: Query<(), (Added<Pressed>, With<LevelDropdownButton>)>,
     mut options: Query<&mut Node, With<LevelOptions>>,
 ) {
-    for interaction in &q {
-        if *interaction == Interaction::Pressed {
-            for mut node in &mut options {
-                node.display =
-                    if node.display == Display::None { Display::Flex } else { Display::None };
-            }
+    if !q.is_empty() {
+        for mut node in &mut options {
+            node.display =
+                if node.display == Display::None { Display::Flex } else { Display::None };
         }
     }
 }
 
 /// Clicking a level in the list queues the switch and closes the dropdown.
 fn handle_level_option(
-    q: Query<(&Interaction, &LevelOptionButton), Changed<Interaction>>,
+    q: Query<&LevelOptionButton, Added<Pressed>>,
     mut pending: ResMut<PendingLevel>,
     mut options: Query<&mut Node, With<LevelOptions>>,
 ) {
-    for (interaction, choice) in &q {
-        if *interaction == Interaction::Pressed {
-            pending.0 = Some(choice.0);
-            for mut node in &mut options {
-                node.display = Display::None;
-            }
+    for choice in &q {
+        pending.0 = Some(choice.0);
+        for mut node in &mut options {
+            node.display = Display::None;
         }
     }
 }
