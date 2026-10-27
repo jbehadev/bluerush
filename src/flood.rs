@@ -17,9 +17,10 @@ use bevy::camera::Exposure;
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
-use bevy::light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder};
+use bevy::light::atmosphere::ScatteringMedium;
+use bevy::light::{light_consts::lux, Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder};
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::{Atmosphere, ExtendedMaterial, MaterialExtension, ScatteringMedium};
+use bevy::pbr::{AtmosphereSettings, ExtendedMaterial, MaterialExtension};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -668,11 +669,15 @@ fn setup(
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     level_path: Res<LevelPath>,
 ) {
+    // Physically based sky + haze: the atmosphere is its own "planet" entity
+    // (auto-placed one Earth radius below the origin); cameras with
+    // `AtmosphereSettings` render the nearest one. World units are metres.
+    commands.spawn(Atmosphere::earth(scattering_mediums.add(ScatteringMedium::default())));
+
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 360.0, 470.0).looking_at(Vec3::ZERO, Vec3::Y),
-        // Physically based sky + haze. World units are treated as metres.
-        Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
+        AtmosphereSettings::default(),
         // Light the scene (and the water's reflections) from that sky.
         AtmosphereEnvironmentMapLight::default(),
         // Real sunlight is ~100k lux, so expose like a camera on a sunny day.
@@ -685,7 +690,7 @@ fn setup(
     ));
     commands.insert_resource(OrbitCamera { focus: Vec3::ZERO, yaw: 0.0, pitch: 0.65, distance: 592.0 });
     commands.spawn((
-        DirectionalLight { illuminance: lux::RAW_SUNLIGHT, shadows_enabled: true, ..default() },
+        DirectionalLight { illuminance: lux::RAW_SUNLIGHT, shadow_maps_enabled: true, ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.9, 0.5, 0.0)),
         // Spread the shadow map over the whole ~600-unit map.
         CascadeShadowConfigBuilder {
@@ -1050,7 +1055,7 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
             // expands the list of levels found in the levels directory.
             panel.spawn((
                 Text::new("LEVEL"),
-                TextFont { font_size: 11.0, ..default() },
+                TextFont { font_size: FontSize::Px(11.0), ..default() },
                 TextColor(Color::srgb(0.65, 0.66, 0.72)),
             ));
             panel
@@ -1069,7 +1074,7 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                 .with_children(|b| {
                     b.spawn((
                         Text::new(library.current_name.clone()),
-                        TextFont { font_size: 11.0, ..default() },
+                        TextFont { font_size: FontSize::Px(11.0), ..default() },
                         TextColor(Color::WHITE),
                         LevelDropdownLabel,
                     ));
@@ -1102,7 +1107,7 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                         .with_children(|b| {
                             b.spawn((
                                 Text::new(entry.name.clone()),
-                                TextFont { font_size: 10.0, ..default() },
+                                TextFont { font_size: FontSize::Px(10.0), ..default() },
                                 TextColor(Color::srgb(0.85, 0.86, 0.90)),
                             ));
                         });
@@ -1127,7 +1132,7 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                 .with_children(|b| {
                     b.spawn((
                         Text::new("Running"),
-                        TextFont { font_size: 12.0, ..default() },
+                        TextFont { font_size: FontSize::Px(12.0), ..default() },
                         TextColor(Color::WHITE),
                         PauseLabel,
                     ));
@@ -1135,7 +1140,7 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
 
             panel.spawn((
                 Text::new("OBJECTS"),
-                TextFont { font_size: 11.0, ..default() },
+                TextFont { font_size: FontSize::Px(11.0), ..default() },
                 TextColor(Color::srgb(0.65, 0.66, 0.72)),
             ));
             for w in WEIGHTS {
@@ -1155,7 +1160,7 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                     .with_children(|b| {
                         b.spawn((
                             Text::new(format!("{w:.0} kg")),
-                            TextFont { font_size: 11.0, ..default() },
+                            TextFont { font_size: FontSize::Px(11.0), ..default() },
                             TextColor(Color::WHITE),
                         ));
                     });
@@ -1177,7 +1182,7 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                 .with_children(|b| {
                     b.spawn((
                         Text::new("Pour Water"),
-                        TextFont { font_size: 11.0, ..default() },
+                        TextFont { font_size: FontSize::Px(11.0), ..default() },
                         TextColor(Color::WHITE),
                     ));
                 });
@@ -1198,14 +1203,14 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                 .with_children(|b| {
                     b.spawn((
                         Text::new("Erase"),
-                        TextFont { font_size: 11.0, ..default() },
+                        TextFont { font_size: FontSize::Px(11.0), ..default() },
                         TextColor(Color::WHITE),
                     ));
                 });
 
             panel.spawn((
                 Text::new("WAVE"),
-                TextFont { font_size: 11.0, ..default() },
+                TextFont { font_size: FontSize::Px(11.0), ..default() },
                 TextColor(Color::srgb(0.65, 0.66, 0.72)),
                 Node { margin: UiRect::top(Val::Px(8.0)), ..default() },
             ));
@@ -1231,7 +1236,7 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                     .with_children(|b| {
                         b.spawn((
                             Text::new(name),
-                            TextFont { font_size: 11.0, ..default() },
+                            TextFont { font_size: FontSize::Px(11.0), ..default() },
                             TextColor(Color::WHITE),
                         ));
                     });
@@ -1255,14 +1260,14 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                 .with_children(|b| {
                     b.spawn((
                         Text::new("FLOOD!"),
-                        TextFont { font_size: 12.0, ..default() },
+                        TextFont { font_size: FontSize::Px(12.0), ..default() },
                         TextColor(Color::WHITE),
                     ));
                 });
 
             panel.spawn((
                 Text::new("[Space] pause\n[R] drain\n[F] flood"),
-                TextFont { font_size: 11.0, ..default() },
+                TextFont { font_size: FontSize::Px(11.0), ..default() },
                 TextColor(Color::srgb(0.65, 0.66, 0.72)),
                 Node { margin: UiRect::top(Val::Px(8.0)), ..default() },
             ));
@@ -1910,7 +1915,7 @@ fn update_water_mesh(
     handle: Res<WaterMesh>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let Some(mesh) = meshes.get_mut(handle.0.id()) else { return };
+    let Some(mut mesh) = meshes.get_mut(handle.0.id()) else { return };
     let t = &terrain.0;
     let obs = &obstacle.0;
     let d = &water.depth;
