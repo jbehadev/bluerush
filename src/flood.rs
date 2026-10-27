@@ -229,6 +229,26 @@ struct FloatObject {
     y: f32, // current height of the object's underside
 }
 
+/// A player-drawn wall: a straight, static barrier from `a` to `b` (world x, z).
+/// Its thickness and height come from the weight selected when it was drawn.
+/// Unlike blocks, walls never float or move — they're levees for steering water.
+/// The rendered cubes are child entities, so despawning the wall removes them too.
+#[derive(Component)]
+struct Wall {
+    a: Vec2,
+    b: Vec2,
+    weight: f32,
+}
+
+/// An in-progress left-button drag with the block tool. `start` is where the
+/// button went down; `last` tracks the latest cursor hit so a release over the
+/// UI panel / off the map still knows where the drag ended.
+#[derive(Resource, Default)]
+struct WallDrag {
+    start: Option<Vec2>,
+    last: Vec2,
+}
+
 /// Shared cube mesh for spawning objects at runtime (right-click).
 #[derive(Resource)]
 struct ObjectAssets {
@@ -430,6 +450,68 @@ fn spawn_object(
     ));
 }
 
+/// Distance from point `p` to the segment `a`–`b`, plus the closest point on it.
+fn closest_on_segment(p: Vec2, a: Vec2, b: Vec2) -> (f32, Vec2) {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    let t = if len2 < 1e-6 { 0.0 } else { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) };
+    let q = a + ab * t;
+    (p.distance(q), q)
+}
+
+/// A drag shorter than this (world units) counts as a click → drop one block.
+fn wall_min_len(weight: f32) -> f32 {
+    obj_footprint(weight)
+}
+
+/// Spawn a wall from `a` to `b`. It's rendered as a run of short cubes, each
+/// sitting on the terrain under it, so the wall hugs slopes instead of floating
+/// over dips or burying itself in rises.
+fn spawn_wall(
+    commands: &mut Commands,
+    cube: Handle<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    terrain: &[f32],
+    a: Vec2,
+    b: Vec2,
+    weight: f32,
+) {
+    let len = a.distance(b);
+    let dir = (b - a) / len.max(1e-6);
+    let thick = obj_footprint(weight);
+    let h = obj_height(weight);
+    let rot = Quat::from_rotation_y(-dir.y.atan2(dir.x)); // local +X → along the wall
+    let n = (len / (CELL * 2.0)).ceil().max(1.0) as usize;
+    let seg = len / n as f32;
+    let ground = |p: Vec2| { let (gx, gz) = cell_of(p); terrain[idx(gx, gz)] };
+    let material = materials.add(weight_color(weight));
+
+    commands
+        .spawn((Wall { a, b, weight }, Transform::default(), Visibility::default()))
+        .with_children(|parent| {
+            for k in 0..n {
+                let s0 = a + dir * (seg * k as f32);
+                let s1 = s0 + dir * seg;
+                let mid = (s0 + s1) * 0.5;
+                // Span the lowest to highest ground under this piece, so
+                // neighbouring pieces overlap vertically with no gaps.
+                let (g0, g1, gm) = (ground(s0), ground(s1), ground(mid));
+                let base = g0.min(g1).min(gm) - 1.0;
+                let top = g0.max(g1).max(gm) + h;
+                parent.spawn((
+                    Mesh3d(cube.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform {
+                        translation: Vec3::new(mid.x, (base + top) * 0.5, mid.y),
+                        rotation: rot,
+                        // A hair longer than the piece so neighbours overlap (no seams).
+                        scale: Vec3::new(seg + 0.5, top - base, thick),
+                    },
+                ));
+            }
+        });
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -451,6 +533,7 @@ impl Plugin for FloodPlugin {
             .insert_resource(Paused(false))
             .insert_resource(Surge::default())
             .insert_resource(PendingLevel::default())
+            .insert_resource(WallDrag::default())
             // setup builds the LevelLibrary that setup_ui's dropdown lists.
             .add_systems(Startup, (setup, setup_ui).chain())
             // UI / camera / input handling (order-independent).
@@ -616,9 +699,38 @@ fn setup(
 
 /// Mark cells under grounded (can't-float) objects as raised floor, so the flow
 /// dams behind them and diverts around. Floating objects don't obstruct.
-fn build_obstacles(water: Res<Water>, objs: Query<&FloatObject>, mut obstacle: ResMut<Obstacle>) {
+fn build_obstacles(
+    water: Res<Water>,
+    objs: Query<&FloatObject>,
+    walls: Query<&Wall>,
+    mut obstacle: ResMut<Obstacle>,
+) {
     for o in obstacle.0.iter_mut() {
         *o = 0.0;
+    }
+    // Walls always dam: raise every cell whose centre lies inside the wall's
+    // rectangle (within half the thickness of the a–b line, between the ends).
+    let off = half();
+    for wall in &walls {
+        let hw = obj_footprint(wall.weight) * 0.5;
+        let dam = obj_height(wall.weight);
+        let (lo, hi) = (wall.a.min(wall.b) - Vec2::splat(hw), wall.a.max(wall.b) + Vec2::splat(hw));
+        let (x0, z0) = cell_of(lo);
+        let (x1, z1) = cell_of(hi);
+        let ab = wall.b - wall.a;
+        let len = ab.length().max(1e-6);
+        let dir = ab / len;
+        for z in z0..=z1 {
+            for x in x0..=x1 {
+                let rel = Vec2::new(x as f32 * CELL - off, z as f32 * CELL - off) - wall.a;
+                let along = rel.dot(dir);
+                let across = rel.perp_dot(dir).abs();
+                if along >= 0.0 && along <= len && across <= hw {
+                    let c = idx(x, z);
+                    obstacle.0[c] = obstacle.0[c].max(dam);
+                }
+            }
+        }
     }
     for obj in &objs {
         let (gx, gz) = cell_of(obj.pos);
@@ -655,7 +767,11 @@ fn build_obstacles(water: Res<Water>, objs: Query<&FloatObject>, mut obstacle: R
 
 /// Separate overlapping objects (mass-weighted): the lighter one gets shoved
 /// more, so a heavy block holds its ground and others pile against it.
-fn object_collision(paused: Res<Paused>, mut q: Query<(Entity, &mut FloatObject)>) {
+fn object_collision(
+    paused: Res<Paused>,
+    walls: Query<&Wall>,
+    mut q: Query<(Entity, &mut FloatObject)>,
+) {
     if paused.0 {
         return;
     }
@@ -683,15 +799,30 @@ fn object_collision(paused: Res<Paused>, mut q: Query<(Entity, &mut FloatObject)
     for (e, mut obj) in &mut q {
         if let Some(c) = corr.get(&e) {
             obj.pos += *c;
-            obj.pos.x = obj.pos.x.clamp(-bound, bound);
-            obj.pos.y = obj.pos.y.clamp(-bound, bound);
         }
+        // Walls are immovable: shove the object fully clear of each one and
+        // kill the velocity component driving it into the wall.
+        for wall in &walls {
+            let min_dist = (obj_footprint(obj.weight) + obj_footprint(wall.weight)) * 0.5;
+            let (dist, q) = closest_on_segment(obj.pos, wall.a, wall.b);
+            if dist < min_dist {
+                let n = if dist > 1e-4 { (obj.pos - q) / dist } else { (wall.b - wall.a).perp().normalize_or(Vec2::X) };
+                obj.pos = q + n * min_dist;
+                let into = obj.vel.dot(n);
+                if into < 0.0 {
+                    obj.vel -= n * into;
+                }
+            }
+        }
+        obj.pos.x = obj.pos.x.clamp(-bound, bound);
+        obj.pos.y = obj.pos.y.clamp(-bound, bound);
     }
 }
 
 /// Apply the selected tool at the cursor with the left mouse button: pour water
-/// (while held) or drop one object of the chosen weight (on press). Clicks over
-/// the left toolbar, or while a camera modifier is held, are ignored.
+/// (while held), or with a block weight selected either click to drop one block
+/// or click-drag-release to build a wall along the drag. Clicks over the left
+/// toolbar, or while a camera modifier is held, are ignored.
 fn handle_click(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -703,14 +834,43 @@ fn handle_click(
     assets: Res<ObjectAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     objects: Query<(Entity, &FloatObject)>,
+    walls: Query<(Entity, &Wall)>,
+    mut drag: ResMut<WallDrag>,
     mut commands: Commands,
 ) {
     if camera_modifier_held(&keys) {
-        return; // left-drag is steering the camera
+        drag.start = None; // left-drag is steering the camera
+        return;
     }
     let Ok(window) = windows.single() else { return };
     let Ok((camera, cam_t)) = cameras.single() else { return };
-    let Some(hit) = cursor_hit(window, camera, cam_t, &terrain.0, &water) else { return };
+    let hit = cursor_hit(window, camera, cam_t, &terrain.0, &water);
+
+    // Block tool: the press only remembers where the drag began; the release
+    // decides — a short drag drops one block, a long one builds a wall. The
+    // release works even off the map, using the last point the cursor was over.
+    if let SelectedTool::Object(w) = *tool {
+        if let Some(h) = hit {
+            drag.last = Vec2::new(h.x, h.z);
+            if mouse.just_pressed(MouseButton::Left) {
+                drag.start = Some(drag.last);
+            }
+        }
+        if mouse.just_released(MouseButton::Left) {
+            if let Some(start) = drag.start.take() {
+                let end = drag.last;
+                if start.distance(end) < wall_min_len(w) {
+                    spawn_object(&mut commands, assets.cube.clone(), &mut materials, &terrain.0, start, w);
+                } else {
+                    spawn_wall(&mut commands, assets.cube.clone(), &mut materials, &terrain.0, start, end, w);
+                }
+            }
+        }
+        return;
+    }
+    drag.start = None;
+
+    let Some(hit) = hit else { return };
 
     match *tool {
         SelectedTool::Pour => {
@@ -723,12 +883,7 @@ fn handle_click(
                 }
             }
         }
-        SelectedTool::Object(w) => {
-            if mouse.just_pressed(MouseButton::Left) {
-                spawn_object(&mut commands, assets.cube.clone(), &mut materials, &terrain.0,
-                    Vec2::new(hit.x, hit.z), w);
-            }
-        }
+        SelectedTool::Object(_) => {} // handled above
         SelectedTool::Erase => {
             if mouse.just_pressed(MouseButton::Left) {
                 // Delete the object nearest the cursor (within ~its footprint).
@@ -742,8 +897,17 @@ fn handle_click(
                         best = Some((e, dist));
                     }
                 }
+                // Walls count too: measure to the nearest point along the wall.
+                for (e, wall) in &walls {
+                    let (dist, _) = closest_on_segment(target, wall.a, wall.b);
+                    if dist < obj_footprint(wall.weight) * 0.7
+                        && best.map_or(true, |(_, bd)| dist < bd)
+                    {
+                        best = Some((e, dist));
+                    }
+                }
                 if let Some((e, _)) = best {
-                    commands.entity(e).despawn();
+                    commands.entity(e).despawn(); // also removes a wall's child pieces
                 }
             }
         }
@@ -1152,6 +1316,7 @@ fn switch_level(
     assets: Res<ObjectAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     objects: Query<Entity, With<FloatObject>>,
+    walls: Query<Entity, With<Wall>>,
     mut label: Query<&mut Text, With<LevelDropdownLabel>>,
     mut commands: Commands,
 ) {
@@ -1176,7 +1341,7 @@ fn switch_level(
     water.rvel.iter_mut().for_each(|v| *v = 0.0);
     water.flow.iter_mut().for_each(|v| *v = Vec2::ZERO);
 
-    for entity in &objects {
+    for entity in objects.iter().chain(walls.iter()) {
         commands.entity(entity).despawn();
     }
     for obj in &loaded.objects {
@@ -1330,6 +1495,7 @@ fn draw_placement_cursor(
     tool: Res<SelectedTool>,
     terrain: Res<Terrain>,
     water: Res<Water>,
+    drag: Res<WallDrag>,
     mut gizmos: Gizmos,
 ) {
     let Ok(window) = windows.single() else { return };
@@ -1343,6 +1509,26 @@ fn draw_placement_cursor(
     };
 
     match *tool {
+        // Mid-drag and long enough to be a wall: outline the wall instead of a block.
+        SelectedTool::Object(w)
+            if drag.start.is_some_and(|s| s.distance(Vec2::new(hit.x, hit.z)) >= wall_min_len(w)) =>
+        {
+            let a = drag.start.unwrap();
+            let b = Vec2::new(hit.x, hit.z);
+            let dir = (b - a).normalize();
+            let side = dir.perp() * obj_footprint(w) * 0.5;
+            let h = obj_height(w);
+            let col = Color::srgb(1.0, 0.95, 0.30);
+            let ground = |p: Vec2| { let (gx, gz) = cell_of(p); terrain.0[idx(gx, gz)] };
+            let corners = [a - side, b - side, b + side, a + side];
+            let at = |p: Vec2, y: f32| Vec3::new(p.x, y, p.y);
+            for k in 0..4 {
+                let (p, q) = (corners[k], corners[(k + 1) % 4]);
+                edge(at(p, ground(p) + 0.5), at(q, ground(q) + 0.5), col);
+                edge(at(p, ground(p) + h), at(q, ground(q) + h), col);
+                edge(at(p, ground(p) + 0.5), at(p, ground(p) + h), col);
+            }
+        }
         SelectedTool::Object(w) => {
             let hx = obj_footprint(w) * 0.5;
             let hy = obj_height(w) * 0.5;
@@ -1720,6 +1906,20 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    #[test]
+    fn closest_on_segment_clamps_to_ends() {
+        let (a, b) = (Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0));
+        // Beside the middle: perpendicular distance, foot of the perpendicular.
+        let (d, q) = closest_on_segment(Vec2::new(4.0, 3.0), a, b);
+        assert!((d - 3.0).abs() < 1e-5 && q == Vec2::new(4.0, 0.0));
+        // Past an end: distance to that endpoint.
+        let (d, q) = closest_on_segment(Vec2::new(13.0, 4.0), a, b);
+        assert!((d - 5.0).abs() < 1e-5 && q == b);
+        // Degenerate (zero-length) wall behaves like a point.
+        let (d, _) = closest_on_segment(Vec2::new(3.0, 4.0), a, a);
+        assert!((d - 5.0).abs() < 1e-5);
+    }
 
     /// Regenerate the shipped valley level files from the procedural terrain:
     ///   cargo test generate_valley_level -- --ignored

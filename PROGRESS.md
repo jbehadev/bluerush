@@ -412,6 +412,21 @@ src/
 - **Concepts** — `image` crate (decode to `Luma<u16>`, `ImageBuffer::save`); bilinear
   sampling; golden-file generation via an ignored test; plugin structs with config fields.
 
+### Session 21 (Draggable walls)
+
+- **Click vs drag** — with a weight selected, a click still drops a block; click-hold-drag-release
+  builds a **wall** along the drag (drags shorter than one block footprint count as a click).
+  `WallDrag` resource remembers the press point and the last cursor hit, so release works even
+  off the map; press + release in the same frame (trackpad tap) still drops a block.
+- **`Wall { a, b, weight }`** — static levee: never floats/moves, always dams. Thickness/height
+  come from the selected weight. Rendered as child cube pieces (`with_children`), each sitting on
+  the terrain under it so it hugs slopes; despawning the parent removes the pieces.
+- **Integration** — `build_obstacles` raises cells inside the wall rectangle (dot/perp_dot
+  projection); `object_collision` pushes blocks out of walls and cancels inward velocity; Erase
+  removes the nearest wall; `switch_level` clears walls; gizmo outline previews the wall mid-drag.
+- **Tests** — `closest_on_segment` helper unit-tested (5 passing + 3 ignored level generators).
+- **Concepts** — parent/child entities, per-frame state in a resource, point-to-segment distance.
+
 ## Where We Left Off (current)
 
 Weir-model overtopping done on `feat/heightfield-water`: water backs up behind a grounded block and
@@ -427,6 +442,7 @@ Branch commits: `31b6831` look → `6b853e4` flooding+objects → `0d05b25` coll
 Not yet pushed; old 2D code preserved on `main`.
 
 ## What Comes Next
+- **Walls (optional)** — weight-based walls that can be undermined/washed away; curved/polyline walls.
 - **Crest-edge polish (optional)** — the upstream overtopping sheet sticks out ~1 cell past the
   block back; needs finer geometry near obstacles if it ever bothers us.
 - **Config + cleanup** — adapt `config.rs` fields to the heightfield game; drop now-unused deps
