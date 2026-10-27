@@ -321,6 +321,7 @@ src/
   flood.rs    — terrain, water sim, objects, render, UI, camera; shared helpers are pub(crate)
   scenery.rs  — scenery sets (trees / city / ruins): pure placement + rebuild system + panel buttons
   rain.rs     — the source drawn as a rain cloud with falling rain (visual only)
+  surround.rs — decorative land + distant mountains around the map (fills the horizon)
   config.rs   — AppConfig (window size + level path, from config.yaml)
   level.rs    — level yaml + PNG heightmap loading (incl. `scenery:` list)
 assets/shaders/water.wesl   — custom water material
@@ -625,7 +626,33 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
   towns on Valley/River Delta sit above the flood (need FLOOD! surges / walls to reach them).
 - Tests: 50 (+6: load model, wear, tipping direction, blocker footprints).
 
+### Session 29 (Scenery surround + shore foam)
+- **Grey band fixed** (`src/surround.rs`) — a ~9 km ring of decorative land around the map:
+  rings of vertices grow outward from the map's perimeter (each ring the edge square scaled up
+  about the centre, spaced quadratically — dense near the map). Ring 0 *is* the map edge (exact
+  heights + `terrain_normal`), so there's no seam; it eases to a smoothed edge, relaxes into
+  rolling countryside (value-noise fbm), and rises into a ridged-noise mountain ring that hides
+  the horizon from every allowed camera angle. Same `TerrainMaterial` as the map; rebuilt on
+  level switch (`SurroundMesh` handle, like `TerrainMesh`); `NotShadowCaster`.
+  - **Bevy:** `Projection::Perspective(PerspectiveProjection { far: 20_000.0, .. })` — Bevy's
+    depth is infinite reverse-Z, so `far` only affects culling. The atmosphere's aerial
+    perspective hazes distant land blue for free — no fog needed.
+  - **Look fixes found by screenshot:** low land past the drain was a sand desert (colour comes
+    from height) → UV.x eases to grass away from the edge; the 60-unit grass blotches repeated
+    for km like camouflage → UV.y carries "distance out" and terrain.wesl cross-fades to a
+    larger noise. Lesson: scaling noise coordinates by distance *warps* it into radial streaks;
+    cross-fade two fixed-scale noises instead.
+- **Shore foam** (`water.wesl`) — thin (view-ray thickness < `FOAM_WIDTH`) + fast
+  (`FOAM_SPEED` range) water churns into white clumps that drift with the current (same
+  two-phase flow-map trick as the ripples; fine octave fades with `fwidth`). Kept off the exact
+  waterline — an opaque line there traced the water mesh's stair-stepped cell edges. First
+  thresholds foamed every shore incl. the calm lake; raising `FOAM_SPEED` to 9–22 fixed it.
+- Tests: 54 (+4: perimeter, ring spacing, surround height, mesh shares edge heights).
+
 ## Where We Left Off (current)
+
+**Session 29 (`feat/scenery-surround`)** — surround land + mountains replace the grey band;
+shore foam on fast, thin water. Next: object destruction, or planar reflections.
 
 **Session 28 (`feat/scenery-destruction`)** — scenery dams the water and is broken by it (topple,
 crumble, debris that floats away). Next: object destruction, or polish (splash/dust when things
@@ -674,9 +701,9 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
   damage tint/cracks, debris colliding with blocks/walls, debris jams that dam.
 - **Object destruction (next)** — reuse `water_load` + `wear` for player blocks/walls: a strong
   enough current sweeps away or breaks them.
-- **Scenery realism** — ~~textured terrain~~ done (session 27); fix the grey band
-  past the map edge (larger surround terrain or far backdrop), shore foam where flow is fast,
-  optionally planar reflections of banks/blocks.
+- **Scenery realism** — ~~textured terrain~~ (27), ~~grey band → surround land~~ and
+  ~~shore foam~~ (29) done. Remaining (optional): planar reflections of banks/blocks (second
+  camera render); sparse trees on the near surround; snow/rock on the far mountains.
 - **Walls (optional)** — weight-based walls that can be undermined/washed away; curved/polyline walls.
 - **Crest-edge polish (optional)** — the upstream overtopping sheet sticks out ~1 cell past the
   block back; needs finer geometry near obstacles if it ever bothers us.

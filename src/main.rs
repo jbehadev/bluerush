@@ -10,6 +10,7 @@ mod flood;
 mod level;
 mod rain;
 mod scenery;
+mod surround;
 
 fn main() {
     let config = AppConfig::load();
