@@ -319,8 +319,9 @@ Parked as a reference — not the direction.
 src/
   main.rs    — window/config + add_plugins(FloodPlugin)
   flood.rs   — the whole game: terrain, water sim, objects, render, UI, camera (single module)
-  config.rs  — AppConfig (still old fields; adapt later)
-  camera.rs, textures.rs — unreferenced (old, kept for reference)
+  config.rs  — AppConfig (window size + level path, from config.yaml)
+  level.rs   — level yaml + PNG heightmap loading
+assets/shaders/water.wgsl — custom water material
 ```
 
 ### Session 18 (Erase, height/depth gradients, docs)
@@ -458,7 +459,26 @@ src/
 - **New tunables** — `WATER_ABSORPTION`, `SHORE_FADE`, `RIPPLE_STRENGTH`, `RIPPLE_SIZE`
   (replace `DEPTH_COLOR_MAX`); shallow/deep colours + `reflectance` in `setup`.
 
+### Session 23 (Cleanup before the Bevy upgrade)
+
+- **Decision** — Bevy 0.19 (Jun 2026) and 0.20 (Oct 8 2026) are out; we're on 0.18. No third-party
+  Bevy plugins, so nothing blocks upgrading. Plan: cleanup → tests → upgrade 0.18→0.19→0.20 in
+  separate steps (one migration guide at a time; tests catch sim regressions).
+- **Removed dead code** — `src/camera.rs`, `src/textures.rs` (not in the module tree), the old 2D
+  grid levels `levels/*.json`.
+- **Trimmed `Cargo.toml`** — dropped `serde_json`, `rfd` (old save/load), `default-run` (no
+  `src/bin/` left), and the direct `bevy_mesh`/`bevy_asset` deps.
+- **Concept: crate re-exports** — `bevy` re-exports its sub-crates, so `bevy_mesh::Indices` is
+  also `bevy::mesh::Indices`. Importing through `bevy::` keeps one version number to bump instead
+  of several that must match.
+- **Concept: rebasing** — main moved (PR #32) mid-session; rebased the branch onto it and resolved
+  an import-line conflict in `flood.rs` by keeping both sides.
+- **README** — rewritten gameplay / structure / tech-stack sections for the heightfield game.
+
 ## Where We Left Off (current)
+
+**Session 23 (`chore/cleanup`)** — dead files, old levels and unused deps removed; README current.
+Next up is unit tests for the sim helpers, then the Bevy 0.19 → 0.20 upgrade.
 
 **Session 22 (`feat/realistic-water`)** — water now renders with a custom shader: translucent,
 depth-tinted teal, flowing ripples, sky reflections from a physical atmosphere, sun shadows. Known
@@ -490,9 +510,11 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 - **Walls (optional)** — weight-based walls that can be undermined/washed away; curved/polyline walls.
 - **Crest-edge polish (optional)** — the upstream overtopping sheet sticks out ~1 cell past the
   block back; needs finer geometry near obstacles if it ever bothers us.
-- **Config + cleanup** — adapt `config.rs` fields to the heightfield game; drop now-unused deps
-  (rand stays — used by Random wave; `serde_json`/`rfd` go); remove `camera.rs`/`textures.rs`/old levels.
-- **Tests** — extract pure sim helpers (flow, buoyancy, obstacle) and unit-test them.
+- ~~**Config + cleanup**~~ Done (session 23).
+- **Tests (next)** — extract pure sim helpers (flow, buoyancy, obstacle) and unit-test them; safety
+  net for the upgrade.
+- **Bevy upgrade** — 0.18 → 0.19 (build/test/run), then 0.19 → 0.20 (use 0.20.1+ if released).
+  Known 0.20 change: pointer events flattened (`Pointer<Press>` → `PointerPress`).
 - **Object destruction** — a strong enough current sweeps away or breaks objects.
 - ~~**Levels** — author terrain heightmaps; save/load.~~ Done (session 20): PNG heightmap +
   yaml levels, see `docs/LEVELS.md`. Remaining: more shipped levels, in-game level picker.
