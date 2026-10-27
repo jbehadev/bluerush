@@ -31,6 +31,7 @@ use std::collections::HashMap;
 
 use crate::level::{self, LoadedLevel, ObjectConfig, SourceConfig};
 use crate::scenery::{self, ActiveScenery, SceneryKind};
+use crate::surround;
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -101,6 +102,11 @@ const WATER_ABSORPTION: f32 = 0.10; // murkiness per world unit of water the vie
 const SHORE_FADE: f32 = 1.5; // water this thin (world units) fades into the terrain
 const RIPPLE_STRENGTH: f32 = 0.12; // how far ripples tilt the surface normal
 const RIPPLE_SIZE: f32 = 10.0; // world units per ripple-noise cell
+// Shore foam: fast water churns white where it runs thin — along banks and
+// around blocks. "Thin" is the water the view ray crosses (as for the shore fade).
+const FOAM_WIDTH: f32 = 4.0; // water thinner than this (world units) can foam
+const FOAM_SPEED: (f32, f32) = (9.0, 22.0); // current (world units/sec): no foam → full foam
+const FOAM_SIZE: f32 = 3.0; // world units per foam-noise cell (size of the clumps)
 
 // Ground cover (see assets/shaders/terrain.wesl).
 pub(crate) const GROUND_SAND_LINE: f32 = 0.18; // fraction of the height range below which ground is sand
@@ -214,6 +220,11 @@ struct PendingLevel(Option<usize>);
 #[derive(Resource)]
 struct TerrainMesh(Handle<Mesh>);
 
+/// Handle of the decorative land around the map (see `surround.rs`), rebuilt
+/// with the terrain so it always continues the current level's edge.
+#[derive(Resource)]
+struct SurroundMesh(Handle<Mesh>);
+
 /// Scan a directory for level yamls, labelled by their `name:` field (file
 /// stem if the yaml doesn't parse). Sorted by name for a stable dropdown.
 fn scan_levels(dir: &std::path::Path) -> Vec<LevelEntry> {
@@ -287,6 +298,8 @@ struct WaterSettings {
     deep_color: Vec4,
     /// x = absorption, y = shore fade, z = ripple strength, w = ripple size
     params: Vec4,
+    /// x = foam width, y/z = foam speed range, w = foam clump size
+    foam: Vec4,
 }
 
 impl MaterialExtension for WaterExt {
@@ -823,6 +836,9 @@ fn setup(
 
     commands.spawn((
         Camera3d::default(),
+        // See out to the surround's distant mountains (the default 1000 would
+        // clip them; Bevy's depth is infinite-reverse-Z, so `far` only culls).
+        Projection::Perspective(PerspectiveProjection { far: 20_000.0, ..default() }),
         Transform::from_xyz(0.0, 360.0, 470.0).looking_at(Vec3::ZERO, Vec3::Y),
         AtmosphereSettings::default(),
         // Light the scene (and the water's reflections) from that sky.
@@ -875,22 +891,29 @@ fn setup(
     let terrain = loaded.heights;
     let terrain_mesh = meshes.add(build_terrain_mesh(&terrain));
     commands.insert_resource(TerrainMesh(terrain_mesh.clone()));
-    commands.spawn((
-        Mesh3d(terrain_mesh),
-        MeshMaterial3d(terrain_materials.add(TerrainMaterial {
-            base: StandardMaterial { perceptual_roughness: 0.95, ..default() },
-            extension: TerrainExt {
-                settings: TerrainSettings {
-                    wet_sand: linear_vec4(Color::srgb(0.55, 0.45, 0.32)),
-                    sand: linear_vec4(Color::srgb(0.80, 0.68, 0.48)),
-                    grass: linear_vec4(Color::srgb(0.30, 0.46, 0.20)),
-                    dry_grass: linear_vec4(Color::srgb(0.56, 0.55, 0.30)),
-                    rock: linear_vec4(Color::srgb(0.47, 0.43, 0.39)),
-                    params: Vec4::new(GROUND_SAND_LINE, GROUND_ROCK_SLOPE, GROUND_GRAIN, 0.0),
-                },
+    let surround_mesh = meshes.add(surround::build_surround_mesh(&terrain));
+    commands.insert_resource(SurroundMesh(surround_mesh.clone()));
+    let terrain_material = terrain_materials.add(TerrainMaterial {
+        base: StandardMaterial { perceptual_roughness: 0.95, ..default() },
+        extension: TerrainExt {
+            settings: TerrainSettings {
+                wet_sand: linear_vec4(Color::srgb(0.55, 0.45, 0.32)),
+                sand: linear_vec4(Color::srgb(0.80, 0.68, 0.48)),
+                grass: linear_vec4(Color::srgb(0.30, 0.46, 0.20)),
+                dry_grass: linear_vec4(Color::srgb(0.56, 0.55, 0.30)),
+                rock: linear_vec4(Color::srgb(0.47, 0.43, 0.39)),
+                params: Vec4::new(GROUND_SAND_LINE, GROUND_ROCK_SLOPE, GROUND_GRAIN, 0.0),
             },
-        })),
+        },
+    });
+    commands.spawn((Mesh3d(terrain_mesh), MeshMaterial3d(terrain_material.clone()), Transform::IDENTITY));
+    // The land past the map edge shares the ground-cover material. It's far
+    // outside the shadow cascades, so it needn't cast shadows.
+    commands.spawn((
+        Mesh3d(surround_mesh),
+        MeshMaterial3d(terrain_material),
         Transform::IDENTITY,
+        bevy::light::NotShadowCaster,
     ));
 
     // Water surface mesh — starts empty, rebuilt each frame from the depth field.
@@ -925,6 +948,7 @@ fn setup(
                     shallow_color: linear_vec4(Color::srgba(0.36, 0.62, 0.56, 0.30)),
                     deep_color: linear_vec4(Color::srgba(0.07, 0.30, 0.29, 0.95)),
                     params: Vec4::new(WATER_ABSORPTION, SHORE_FADE, RIPPLE_STRENGTH, RIPPLE_SIZE),
+                    foam: Vec4::new(FOAM_WIDTH, FOAM_SPEED.0, FOAM_SPEED.1, FOAM_SIZE),
                 },
             },
         })),
@@ -1585,6 +1609,7 @@ fn switch_level(
     mut source: ResMut<Source>,
     mut meshes: ResMut<Assets<Mesh>>,
     terrain_mesh: Res<TerrainMesh>,
+    surround_mesh: Res<SurroundMesh>,
     assets: Res<ObjectAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     objects: Query<Entity, With<FloatObject>>,
@@ -1607,6 +1632,9 @@ fn switch_level(
     if let Err(e) = meshes.insert(terrain_mesh.0.id(), build_terrain_mesh(&loaded.heights)) {
         eprintln!("Failed to swap terrain mesh: {e} — keeping the current level");
         return;
+    }
+    if let Err(e) = meshes.insert(surround_mesh.0.id(), surround::build_surround_mesh(&loaded.heights)) {
+        eprintln!("Failed to swap surround mesh: {e}");
     }
     terrain.0 = loaded.heights;
 

@@ -13,6 +13,9 @@
 //                 sand), thick water is murky green-blue (Beer–Lambert absorption).
 //   3. Shoreline — where that thickness falls to zero the water fades out, so the
 //                 edge blends into the terrain instead of ending in a hard line.
+//   4. Foam     — where the water is both thin and fast (rapids along a bank,
+//                 around a block in the current) it churns into white foam that
+//                 drifts downstream.
 
 //
 // Written in WESL (Bevy 0.20+): `import` statements come first, module paths
@@ -36,6 +39,10 @@ struct WaterSettings {
     // z = ripple strength (how far the normal tilts)
     // w = ripple size (world units per noise cell)
     params: vec4<f32>,
+    // x = foam width: water thinner than this can foam
+    // y, z = current speed range from no foam to full foam
+    // w = foam clump size (world units per noise cell)
+    foam: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> water: WaterSettings;
@@ -93,6 +100,25 @@ fn flowing_slope(p: vec2<f32>, flow: vec2<f32>, t: f32) -> vec2<f32> {
     let s0 = ripple_slope(q - fq * ph0 * PERIOD, t);
     let s1 = ripple_slope(q - fq * ph1 * PERIOD + vec2(37.1, 11.7), t);
     return mix(s0, s1, w1);
+}
+
+// --- Foam ----------------------------------------------------------------
+
+// Foam clumps, dragged along the current the same way as the ripples (two
+// cross-faded copies that restart every PERIOD). Returns roughly -1..1; `px`
+// (world units per pixel) fades the fine octave out before it can alias.
+fn foam_noise(p: vec2<f32>, flow: vec2<f32>, t: f32, px: f32) -> f32 {
+    let PERIOD = 1.2;
+    let ph0 = fract(t / PERIOD);
+    let ph1 = fract(t / PERIOD + 0.5);
+    let w1 = abs(ph0 - 0.5) * 2.0;
+    let size = water.foam.w;
+    let k1 = 1.0 - smoothstep(0.3, 0.8, px / size);
+    let q0 = (p - flow * ph0 * PERIOD) / size;
+    let q1 = (p - flow * ph1 * PERIOD) / size + vec2(23.7, 5.3);
+    let n0 = gnoise(q0 * 0.5) + k1 * 0.6 * gnoise(q0 * 1.7 + vec2(3.3, 9.1));
+    let n1 = gnoise(q1 * 0.5) + k1 * 0.6 * gnoise(q1 * 1.7 + vec2(3.3, 9.1));
+    return mix(n0, n1, w1);
 }
 
 // --- Waterfalls -----------------------------------------------------------
@@ -163,13 +189,29 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     // 3. Fade out right at the shore, and on near-vertical triangles (the mesh
     //    stretched up the side of a block or wall — real water is never that steep).
+    let steep_fade = smoothstep(0.3, 0.65, pbr_input.world_normal.y);
     alpha *= smoothstep(0.0, water.params.y, thickness);
-    alpha *= smoothstep(0.3, 0.65, pbr_input.world_normal.y);
+    alpha *= steep_fade;
+
+    // 3a. Shore foam. Thin + fast = churned white water. The clumpy noise is
+    //     biased up near the bank, so the foam is densest there and breaks up
+    //     into drifting patches farther out. It stays clear of the exact
+    //     waterline: the mesh's shore is stair-stepped cell by cell, and an
+    //     opaque white line right on it would trace every step.
+    var color = body.rgb;
+    let thin = 1.0 - smoothstep(0.0, water.foam.x, thickness);
+    let off_shore = smoothstep(0.4, 1.4, thickness);
+    let fast = smoothstep(water.foam.y, water.foam.z, speed);
+    let clumps = foam_noise(in.world_position.xz, flow, globals.time, length(fwidth(in.world_position.xz)));
+    let foam = fast * thin * off_shore * smoothstep(0.0, 0.6, clumps + 1.0 * thin - 0.6);
+    if foam > 0.0 {
+        color = mix(color, vec3(0.86, 0.90, 0.91), foam);
+        alpha = mix(alpha, 0.85 * steep_fade, foam);
+    }
 
     // 3b. Waterfalls skip both fades: a fall is steep and its film is thin, but
     //     it's churned to white water you can't see through. Blend toward foam
     //     with streaks sliding downward.
-    var color = body.rgb;
     if fall > 0.0 {
         // Sideways coordinate along the lip. A fixed world-space mix (not the
         // current's direction, which swirls at the ends of a fall and draws

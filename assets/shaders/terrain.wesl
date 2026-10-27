@@ -73,8 +73,15 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let px = length(fwidth(p.xz));
 
     // Large, slow blotches (~60-unit patches) that nudge the band edges and
-    // choose between lush and dry grass.
-    let blotch = gnoise(p.xz / 60.0) + 0.5 * gnoise(p.xz / 23.0 + vec2(7.3, 2.9));
+    // choose between lush and dry grass. UV.y is 0 on the map and grows to 1 far
+    // out on the surround land (surround.rs): there the patches get ~6×
+    // bigger and fainter, or the same 60-unit pattern repeated for kilometres
+    // reads as camouflage. (Cross-fade to a second, bigger noise rather than
+    // scaling one by distance — that warps the patches into radial streaks.)
+    let far = in.uv.y;
+    let near_blotch = gnoise(p.xz / 60.0) + 0.5 * gnoise(p.xz / 23.0 + vec2(7.3, 2.9));
+    let far_blotch = gnoise(p.xz / 380.0 + vec2(3.1, 8.7)) + 0.5 * gnoise(p.xz / 140.0 + vec2(5.5, 1.2));
+    let blotch = mix(near_blotch, 0.7 * far_blotch, smoothstep(0.0, 0.5, far));
     let fine = grain(p.xz, px);
 
     // 1. Height, 0 (lowest) .. 1 (highest) over this level's range — baked into
