@@ -155,6 +155,15 @@ A single deforming mesh (`W × D` vertices) is rebuilt each frame:
     `RIPPLE_SIZE`), dragged downstream along the current by a two-phase flow map.
   - **Shore** — alpha fades out as thickness → 0 (`SHORE_FADE`) and on
     near-vertical triangles stretched up wall/block faces.
+  - **Waterfalls** — the exception to that steep fade. `update_water_mesh` scores
+    each vertex with `fall_factor(normal, current)`: steep *and* fast *and*
+    flowing downhill, and only if the cell uphill (`uphill_cell`) is wet — so a
+    sheet from a dry block top to the river behind it doesn't count. Fall vertices
+    are pushed `FALL_STANDOFF` downstream off the rock (a thin film otherwise lies
+    *on* the cliff face). `UV_1` carries the fall amount (x) and how much water is
+    going over (y, lip depth up to `FALL_FULL_DEPTH`); the shader skips both fades
+    there and draws white-water ribbons scrolling downward, wispy for thin films,
+    with `fwidth` fading the streak noise before it aliases when zoomed out.
   - **Two lighting passes** — the body colour is lit with the smooth normal (no
     reflection); the reflection/sun glints with the rippled normal, kept from
     tilting below the horizon. Lighting the body with ripples caused dark flecks.
@@ -231,6 +240,7 @@ pour/erase (`draw_placement_cursor`).
 `RANDOM_INTERVAL` (source) · `FLOW_RATE`, `FLOW_ITERS`, `WET` (flow) ·
 `RIPPLE_SPEED`, `RIPPLE_DAMP`, `MAX_RIPPLE`, `RIPPLE_FADE` (ripples) ·
 `WATER_ABSORPTION`, `SHORE_FADE`, `RIPPLE_STRENGTH`, `RIPPLE_SIZE` (water look) ·
+`FALL_STEEP`, `FALL_SPEED`, `FALL_DOWNHILL`, `FALL_STANDOFF`, `FALL_FULL_DEPTH` (waterfalls) ·
 `BUOYANCY`, `DRAFT`, `VERT_EASE`, `FLOW_TO_SPEED`, `FLOW_EASE`, `REF_WEIGHT`
 (objects) · `OBJ_FOOTPRINT_MIN/MAX`, `OBJ_HEIGHT_MIN/MAX` (weight→size) ·
 `PANEL_WIDTH`, `WEIGHTS` (UI).

@@ -93,6 +93,16 @@ const SHORE_FADE: f32 = 1.5; // water this thin (world units) fades into the ter
 const RIPPLE_STRENGTH: f32 = 0.12; // how far ripples tilt the surface normal
 const RIPPLE_SIZE: f32 = 10.0; // world units per ripple-noise cell
 
+// Waterfalls. Steep water is normally hidden (it's the surface stretched up the
+// side of a block), but steep, fast water flowing *downhill* from wet ground is a
+// fall: it's lifted off the rock and drawn as white water. Worked out per vertex
+// in `update_water_mesh` and handed to water.wesl through the mesh's UV_1.
+const FALL_STEEP: (f32, f32) = (0.3, 0.65); // normal.y range: below = steep, above = flat
+const FALL_SPEED: (f32, f32) = (5.0, 20.0); // current (world units/sec) range: slow → fast
+const FALL_DOWNHILL: (f32, f32) = (0.3, 0.7); // cos(angle) between current and downhill: across → straight down
+const FALL_STANDOFF: f32 = 1.5; // how far a fall's surface is pushed off the rock face
+const FALL_FULL_DEPTH: f32 = 2.0; // lip water this deep (or more) makes a solid white fall; thinner is wispy
+
 fn span() -> f32 {
     (W - 1) as f32 * CELL
 }
@@ -392,6 +402,39 @@ fn weight_color(weight: f32) -> Color {
     let t = (weight / 4000.0).clamp(0.0, 1.0).sqrt();
     let c = 0.82 - t * 0.58;
     Color::srgb(c, c * 0.9, c * 0.75)
+}
+
+/// GLSL-style smoothstep: 0 below `e0`, 1 above `e1`, smooth in between.
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// How much a patch of water surface is a waterfall, 0..1, from its surface
+/// `normal` and its current `flow` (world units/sec). It has to be steep, fast,
+/// *and* flowing downhill — the normal's horizontal part points the way the
+/// surface drops. Flat water, still water, and fast water piling up a block's
+/// upstream face (flowing uphill into it) all score 0.
+fn fall_factor(normal: Vec3, flow: Vec2) -> f32 {
+    let steep = 1.0 - smoothstep(FALL_STEEP.0, FALL_STEEP.1, normal.y);
+    let speed = flow.length();
+    let fast = smoothstep(FALL_SPEED.0, FALL_SPEED.1, speed);
+    let downhill = Vec2::new(normal.x, normal.z).normalize_or_zero();
+    let along = smoothstep(FALL_DOWNHILL.0, FALL_DOWNHILL.1, (flow / speed.max(1e-3)).dot(downhill));
+    steep * fast * along
+}
+
+/// The grid cell one step *uphill* from (x, z), given the surface normal there
+/// (its horizontal part points downhill), along whichever axis is steeper.
+fn uphill_cell(x: usize, z: usize, normal: Vec3) -> (usize, usize) {
+    let step = |c: usize, downhill: f32, max: usize| {
+        if downhill > 0.0 { c.saturating_sub(1) } else { (c + 1).min(max - 1) }
+    };
+    if normal.x.abs() > normal.z.abs() {
+        (step(x, normal.x, W), z)
+    } else {
+        (x, step(z, normal.z, D))
+    }
 }
 
 /// Normalised 0..1 size factor for a weight (200kg → 0, 5000kg → 1, sqrt-spaced
@@ -754,6 +797,8 @@ fn setup(
     // UV_0 doesn't hold texture coordinates here: it carries the local current
     // (world units/sec) so the shader can make ripples flow downstream.
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; W * D]);
+    // UV_1 carries the waterfall amount (x, 0..1) and how much water is going over (y, 0..1).
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, vec![[0.0f32; 2]; W * D]);
     mesh.insert_indices(Indices::U32(Vec::new()));
     let water_handle = meshes.add(mesh);
     commands.spawn((
@@ -1922,8 +1967,10 @@ fn update_water_mesh(
     let mut positions = vec![[0.0f32; 3]; W * D];
     let mut normals = vec![[0.0f32, 1.0, 0.0]; W * D];
     // Colour now comes from the shader (true per-pixel depth); per vertex we
-    // only send the current, so ripples can flow with it.
+    // only send the current (so ripples can flow with it) and how much of a
+    // waterfall the vertex is.
     let mut currents = vec![[0.0f32; 2]; W * D];
+    let mut falls = vec![[0.0f32; 2]; W * D];
     for z in 0..D {
         for x in 0..W {
             let i = idx(x, z);
@@ -1936,6 +1983,23 @@ fn update_water_mesh(
             normals[i] = [n.x, n.y, n.z];
             let v = water.flow[i] * FLOW_TO_SPEED; // same speed floating objects drift at
             currents[i] = [v.x, v.y];
+            // Only water coming *from* somewhere wet can fall: this stops the sheet
+            // stretched from a dry block top down to the fast river behind it
+            // from turning white.
+            let (ux, uz) = uphill_cell(x, z, n);
+            let up_depth = d[idx(ux, uz)];
+            let fall = if up_depth > WET { fall_factor(n, v) } else { 0.0 };
+            // How much water is going over: a thin film spilling off a plateau
+            // should be wispy, not a solid white wall.
+            let volume = smoothstep(WET, FALL_FULL_DEPTH, up_depth);
+            falls[i] = [fall, volume];
+            // A waterfall's surface lies almost on the cliff face (the film is thin),
+            // so push it off the rock — downstream, the way water leaves a lip. (The
+            // current is much smoother than the surface normal, which flips back
+            // and forth along a stair-stepped cliff edge and folded the sheet.)
+            let out = v.normalize_or_zero();
+            let lift = Vec3::new(out.x, 0.0, out.y) * (FALL_STANDOFF * fall);
+            positions[i] = [positions[i][0] + lift.x, positions[i][1] + lift.y, positions[i][2] + lift.z];
         }
     }
 
@@ -1959,6 +2023,7 @@ fn update_water_mesh(
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, currents);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, falls);
     mesh.insert_indices(Indices::U32(indices));
 }
 
@@ -2133,6 +2198,55 @@ mod tests {
         let mut depth = [0.0, 1.0, 0.0];
         run_flow(&mut depth, &floor, 3, 1, 1);
         assert!(depth[1] >= 0.5, "crest drained to {} in one step", depth[1]);
+    }
+
+    // --- Waterfalls -------------------------------------------------------
+
+    /// A surface normal tilted `ny` toward +z (the way the surface drops).
+    fn tilted(ny: f32) -> Vec3 {
+        Vec3::new(0.0, ny, (1.0 - ny * ny).sqrt())
+    }
+
+    #[test]
+    fn fast_water_down_a_cliff_is_a_fall() {
+        // n.y 0.13 / speed 35 downhill: the Waterfall level's cliff, measured in the sim.
+        assert!(fall_factor(tilted(0.13), Vec2::new(0.0, 35.0)) > 0.99);
+    }
+
+    #[test]
+    fn still_water_on_a_steep_face_is_not_a_fall() {
+        assert_eq!(fall_factor(tilted(0.13), Vec2::ZERO), 0.0);
+    }
+
+    #[test]
+    fn fast_water_piling_up_a_block_is_not_a_fall() {
+        // Upstream face of a block: steep, fast, but the current runs *uphill*
+        // into the face. (Running along its side doesn't count either.)
+        assert_eq!(fall_factor(tilted(0.13), Vec2::new(0.0, -35.0)), 0.0);
+        assert_eq!(fall_factor(tilted(0.13), Vec2::new(35.0, 0.0)), 0.0);
+    }
+
+    #[test]
+    fn fast_water_on_flat_ground_is_not_a_fall() {
+        assert_eq!(fall_factor(Vec3::Y, Vec2::new(0.0, 45.0)), 0.0);
+    }
+
+    #[test]
+    fn uphill_cell_steps_against_the_slope() {
+        // Surface dropping toward +z → uphill is z - 1; toward -x → uphill is x + 1.
+        assert_eq!(uphill_cell(10, 10, tilted(0.13)), (10, 9));
+        assert_eq!(uphill_cell(10, 10, Vec3::new(-0.9, 0.3, 0.1)), (11, 10));
+        // Clamped at the map edge instead of wrapping.
+        assert_eq!(uphill_cell(10, 0, tilted(0.13)), (10, 0));
+    }
+
+    #[test]
+    fn fall_factor_ramps_smoothly() {
+        // Halfway along the steepness and speed ranges → a partial fall, no hard edge.
+        let ny = (FALL_STEEP.0 + FALL_STEEP.1) * 0.5;
+        let speed = (FALL_SPEED.0 + FALL_SPEED.1) * 0.5;
+        let f = fall_factor(tilted(ny), Vec2::new(0.0, speed));
+        assert!((f - 0.25).abs() < 1e-3, "{f}");
     }
 
     // --- Buoyancy ----------------------------------------------------------
