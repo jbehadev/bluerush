@@ -18,6 +18,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::scenery::SceneryKind;
+
 type Gray16 = image::ImageBuffer<image::Luma<u16>, Vec<u16>>;
 
 /// A level as written in its `.yaml` file.
@@ -31,6 +33,14 @@ pub struct LevelConfig {
     pub source: SourceConfig,
     #[serde(default)]
     pub objects: Vec<ObjectConfig>,
+    /// Which scenery sets dress the land at load, e.g. `[trees, city]`.
+    /// Leave it out for just trees; `[]` for bare land. Toggleable in-game.
+    #[serde(default = "default_scenery")]
+    pub scenery: Vec<SceneryKind>,
+}
+
+fn default_scenery() -> Vec<SceneryKind> {
+    vec![SceneryKind::Trees]
 }
 
 /// Where water enters the map. `x`/`z` are fractions of the map: x runs
@@ -59,6 +69,7 @@ pub struct LoadedLevel {
     pub heights: Vec<f32>,
     pub source: SourceConfig,
     pub objects: Vec<ObjectConfig>,
+    pub scenery: Vec<SceneryKind>,
 }
 
 /// Load a level yaml + its heightmap PNG, resampling the image to `w × d`.
@@ -72,7 +83,13 @@ pub fn load(path: &str, w: usize, d: usize) -> Result<LoadedLevel, String> {
         .map_err(|e| format!("open heightmap {}: {e}", img_path.display()))?
         .to_luma16(); // 8-bit PNGs are widened automatically, so both work
     let heights = resample(&img, w, d, config.height_scale);
-    Ok(LoadedLevel { name: config.name, heights, source: config.source, objects: config.objects })
+    Ok(LoadedLevel {
+        name: config.name,
+        heights,
+        source: config.source,
+        objects: config.objects,
+        scenery: config.scenery,
+    })
 }
 
 /// Bilinearly sample the heightmap onto the grid; white (65535) maps to `scale`.
@@ -129,6 +146,7 @@ pub fn write_template(path: &str, level: &LoadedLevel, w: usize, d: usize) -> Re
         height_scale: max,
         source: level.source,
         objects: level.objects.clone(),
+        scenery: level.scenery.clone(),
     };
     let yaml = serde_yaml::to_string(&config).map_err(|e| format!("serialise level: {e}"))?;
     std::fs::write(yaml_path, yaml).map_err(|e| format!("write {path}: {e}"))?;
@@ -152,6 +170,14 @@ mod tests {
         assert!((h[1] - 100.0).abs() < 0.01);
         assert!((h[2] - 50.0).abs() < 0.01); // half-gray ≈ half the scale
         assert!((h[3] - 100.0).abs() < 0.01);
+    }
+
+    /// Older level yamls have no `scenery:` line — they get trees.
+    #[test]
+    fn test_missing_scenery_defaults_to_trees() {
+        let yaml = "name: Old\nheightmap: old.png\nheight_scale: 10.0\nsource: {x: 0.5, z: 0.1, radius: 3, rate: 50.0}\n";
+        let config: LevelConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.scenery, vec![SceneryKind::Trees]);
     }
 
     /// Upsampling a 2×1 black→white gradient: the middle sample is the average.
@@ -178,11 +204,13 @@ mod tests {
             heights: heights.clone(),
             source: SourceConfig { x: 0.5, z: 0.1, radius: 3, rate: 50.0 },
             objects: vec![ObjectConfig { x: 0.25, z: 0.75, weight: 800.0 }],
+            scenery: vec![SceneryKind::City, SceneryKind::Ruins],
         };
         write_template(path.to_str().unwrap(), &level, w, d).unwrap();
         let loaded = load(path.to_str().unwrap(), w, d).unwrap();
         assert_eq!(loaded.name, "Round Trip");
         assert_eq!(loaded.objects.len(), 1);
+        assert_eq!(loaded.scenery, vec![SceneryKind::City, SceneryKind::Ruins]);
         assert!((loaded.source.rate - 50.0).abs() < 0.01);
         for (a, b) in heights.iter().zip(&loaded.heights) {
             assert!((a - b).abs() < 0.01, "height mismatch: {a} vs {b}");

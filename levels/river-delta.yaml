@@ -16,3 +16,4 @@ objects:
 - x: 0.7272855
   z: 0.75
   weight: 300.0
+scenery: [trees, city]

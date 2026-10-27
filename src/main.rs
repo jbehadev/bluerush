@@ -8,6 +8,8 @@ use crate::config::AppConfig;
 mod config;
 mod flood;
 mod level;
+mod rain;
+mod scenery;
 
 fn main() {
     let config = AppConfig::load();
@@ -26,5 +28,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(flood::FloodPlugin { level: config.level.clone() })
+        .add_plugins(scenery::SceneryPlugin)
+        .add_plugins(rain::RainPlugin)
         .run();
 }

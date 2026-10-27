@@ -30,6 +30,7 @@ use bevy::ui_widgets::Button;
 use std::collections::HashMap;
 
 use crate::level::{self, LoadedLevel, ObjectConfig, SourceConfig};
+use crate::scenery::{self, ActiveScenery, SceneryKind};
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -40,9 +41,9 @@ use crate::level::{self, LoadedLevel, ObjectConfig, SourceConfig};
 // NOTE: the channel-shape constants below (MEANDER_AMPL, CHANNEL_HW, BANK_K,
 // SOURCE_R) are in *cell* units, so they're scaled to CELL to keep the river the
 // same physical size — halving CELL means ~doubling those cell counts.
-const W: usize = 150;
-const D: usize = 150;
-const CELL: f32 = 4.0;
+pub(crate) const W: usize = 150;
+pub(crate) const D: usize = 150;
+pub(crate) const CELL: f32 = 4.0;
 const SLOPE_HEIGHT: f32 = 45.0; // stream bed drops this much from back (z=0) to front
 const MEANDER_AMPL: f32 = 32.0; // how far (cells) the stream snakes left/right
 const MEANDER_FREQ: f32 = 2.0 * std::f32::consts::PI * 2.5 / D as f32; // ~2.5 S-curves down the length
@@ -76,6 +77,14 @@ const SINE_FREQ: f32 = 1.2; // rad/sec for the Sine wave pattern
 const RANDOM_INTERVAL: f32 = 0.6; // seconds between re-rolls for the Random wave pattern
 const SURGE_SECS: f32 = 3.0; // how long the FLOOD! button's surge lasts
 const SURGE_MULT: f32 = 5.0; // extra source output (× SOURCE rate) during a surge
+// The source is a rain cloud whose storm builds: inflow starts at RAIN_START of
+// the level's rate and eases up to the full rate over RAIN_RAMP_SECS.
+const RAIN_START: f32 = 0.25;
+const RAIN_RAMP_SECS: f32 = 45.0;
+// Rain falls over a patch this many times wider than the level's source radius
+// (same total water), so it spreads out instead of piling into a hill.
+const RAIN_SPREAD: f32 = 2.5;
+const RAIN_RATE_SCALE: f32 = 0.75; // overall rain volume vs each level's yaml `rate` (all levels)
 const FLOW_RATE: f32 = 0.5; // fraction of the surface gap equalised per iteration
 const FLOW_ITERS: usize = 8; // flow iterations per frame (faster spreading = no spike)
 const DT: f32 = 1.0 / 60.0;
@@ -93,6 +102,11 @@ const SHORE_FADE: f32 = 1.5; // water this thin (world units) fades into the ter
 const RIPPLE_STRENGTH: f32 = 0.12; // how far ripples tilt the surface normal
 const RIPPLE_SIZE: f32 = 10.0; // world units per ripple-noise cell
 
+// Ground cover (see assets/shaders/terrain.wesl).
+pub(crate) const GROUND_SAND_LINE: f32 = 0.18; // fraction of the height range below which ground is sand
+const GROUND_ROCK_SLOPE: f32 = 0.6; // normal.y below this (≈ 53° and steeper) is bare rock
+const GROUND_GRAIN: f32 = 0.10; // strength of the fine light/dark surface grain
+
 // Waterfalls. Steep water is normally hidden (it's the surface stretched up the
 // side of a block), but steep, fast water flowing *downhill* from wet ground is a
 // fall: it's lifted off the rock and drawn as white water. Worked out per vertex
@@ -109,7 +123,7 @@ fn span() -> f32 {
 fn half() -> f32 {
     span() * 0.5
 }
-fn idx(x: usize, z: usize) -> usize {
+pub(crate) fn idx(x: usize, z: usize) -> usize {
     z * W + x
 }
 
@@ -119,7 +133,7 @@ fn channel_center(z: usize) -> f32 {
 }
 
 /// Convert a (cell-space) position to a world position.
-fn cell_to_world(cx: f32, cz: f32) -> Vec2 {
+pub(crate) fn cell_to_world(cx: f32, cz: f32) -> Vec2 {
     Vec2::new(cx * CELL - half(), cz * CELL - half())
 }
 
@@ -163,6 +177,7 @@ fn builtin_level() -> LoadedLevel {
             ObjectConfig { x: fx(channel_center(D / 3)), z: fz(D / 3), weight: 150.0 },
             ObjectConfig { x: fx(channel_center(2 * D / 3)), z: fz(2 * D / 3), weight: 800.0 },
         ],
+        scenery: vec![SceneryKind::Trees, SceneryKind::City],
     }
 }
 
@@ -171,7 +186,7 @@ fn builtin_level() -> LoadedLevel {
 // ---------------------------------------------------------------------------
 
 #[derive(Resource)]
-struct Terrain(Vec<f32>);
+pub(crate) struct Terrain(pub(crate) Vec<f32>);
 
 /// Path of the level yaml to load (from `config.yaml`), set by `FloodPlugin`.
 #[derive(Resource)]
@@ -225,16 +240,16 @@ fn scan_levels(dir: &std::path::Path) -> Vec<LevelEntry> {
 /// Where (and how fast) water enters the map, resolved from the level to grid
 /// cells. `run_source` feeds this patch every frame.
 #[derive(Resource)]
-struct Source {
-    x: usize,
-    z: usize,
-    radius: i32,
+pub(crate) struct Source {
+    pub(crate) x: usize,
+    pub(crate) z: usize,
+    pub(crate) radius: i32,
     rate: f32,
 }
 
 #[derive(Resource)]
-struct Water {
-    depth: Vec<f32>,
+pub(crate) struct Water {
+    pub(crate) depth: Vec<f32>,
     ripple: Vec<f32>,
     rvel: Vec<f32>,
     /// Net water movement at each cell this frame (the local current), used to
@@ -269,6 +284,34 @@ struct WaterSettings {
 impl MaterialExtension for WaterExt {
     fn fragment_shader() -> ShaderRef {
         "shaders/water.wesl".into()
+    }
+}
+
+/// The terrain's material: StandardMaterial lighting plus a fragment shader
+/// that paints ground cover — sand, grass, rock — by height, slope and noise.
+type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainExt>;
+
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
+struct TerrainExt {
+    #[uniform(100)]
+    settings: TerrainSettings,
+}
+
+/// GPU-side layout must match `struct TerrainSettings` in terrain.wesl.
+#[derive(ShaderType, Debug, Clone)]
+struct TerrainSettings {
+    wet_sand: Vec4,
+    sand: Vec4,
+    grass: Vec4,
+    dry_grass: Vec4,
+    rock: Vec4,
+    /// x = sand line, y = rock slope, z = grain strength, w = unused
+    params: Vec4,
+}
+
+impl MaterialExtension for TerrainExt {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/terrain.wesl".into()
     }
 }
 
@@ -390,7 +433,20 @@ struct LevelOptionButton(usize);
 /// Whether the simulation is paused. Input, camera, and rendering keep running;
 /// only the water + object simulation freezes.
 #[derive(Resource, Default)]
-struct Paused(bool);
+pub(crate) struct Paused(pub(crate) bool);
+
+/// How long the storm has been building (sim seconds — stops while paused).
+/// Reset on a level switch and by the drain key.
+#[derive(Resource, Default)]
+struct Storm {
+    elapsed: f32,
+}
+
+/// How hard it's raining right now, as a multiple of the level's base rate
+/// (wave pattern × storm build-up, plus any FLOOD! surge). Written by
+/// `run_source`; the rain cloud in rain.rs reads it to draw the rain.
+#[derive(Resource, Default)]
+pub(crate) struct Rainfall(pub(crate) f32);
 
 #[derive(Component)]
 struct PauseButton;
@@ -404,8 +460,33 @@ fn weight_color(weight: f32) -> Color {
     Color::srgb(c, c * 0.9, c * 0.75)
 }
 
+/// Where `h` sits in `min..max`, as 0..1. A flat level (no range) is all 0.
+pub(crate) fn height_fraction(h: f32, min: f32, max: f32) -> f32 {
+    if max - min < 1e-3 { 0.0 } else { ((h - min) / (max - min)).clamp(0.0, 1.0) }
+}
+
+/// Terrain surface normal at grid cell (x, z), from its neighbours' heights.
+pub(crate) fn terrain_normal(t: &[f32], x: usize, z: usize) -> Vec3 {
+    let hl = t[idx(x.saturating_sub(1), z)];
+    let hr = t[idx((x + 1).min(W - 1), z)];
+    let hu = t[idx(x, z.saturating_sub(1))];
+    let hd = t[idx(x, (z + 1).min(D - 1))];
+    Vec3::new(hl - hr, 2.0 * CELL, hu - hd).normalize()
+}
+
+/// Terrain height at fractional cell (cx, cz), blended from the four corners
+/// around it — so a tree between grid points sits on the ground, not above it.
+pub(crate) fn ground_at(t: &[f32], cx: f32, cz: f32) -> f32 {
+    let x0 = (cx.floor() as usize).min(W - 2);
+    let z0 = (cz.floor() as usize).min(D - 2);
+    let (fx, fz) = (cx - x0 as f32, cz - z0 as f32);
+    let top = t[idx(x0, z0)] * (1.0 - fx) + t[idx(x0 + 1, z0)] * fx;
+    let bottom = t[idx(x0, z0 + 1)] * (1.0 - fx) + t[idx(x0 + 1, z0 + 1)] * fx;
+    top * (1.0 - fz) + bottom * fz
+}
+
 /// GLSL-style smoothstep: 0 below `e0`, 1 above `e1`, smooth in between.
-fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -482,7 +563,7 @@ fn separate_pair(pa: Vec2, wa: f32, pb: Vec2, wb: f32) -> (Vec2, Vec2) {
 }
 
 /// Clamp a world position to a grid cell.
-fn cell_of(pos: Vec2) -> (usize, usize) {
+pub(crate) fn cell_of(pos: Vec2) -> (usize, usize) {
     let off = half();
     let gx = (((pos.x + off) / CELL).round() as i32).clamp(0, W as i32 - 1) as usize;
     let gz = (((pos.y + off) / CELL).round() as i32).clamp(0, D as i32 - 1) as usize;
@@ -656,10 +737,13 @@ impl Plugin for FloodPlugin {
         app.insert_resource(LevelPath(self.level.clone()))
             .insert_resource(ClearColor(Color::srgb(0.45, 0.62, 0.78)))
             .add_plugins(MaterialPlugin::<WaterMaterial>::default())
+            .add_plugins(MaterialPlugin::<TerrainMaterial>::default())
             .insert_resource(SelectedTool::Object(500.0))
             .insert_resource(Wave { pattern: WavePattern::Flood, rng_level: 1.0, since_roll: 0.0 })
             .insert_resource(Paused(false))
             .insert_resource(Surge::default())
+            .init_resource::<Storm>()
+            .init_resource::<Rainfall>()
             .insert_resource(PendingLevel::default())
             .insert_resource(WallDrag::default())
             // setup builds the LevelLibrary that setup_ui's dropdown lists.
@@ -711,6 +795,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut water_materials: ResMut<Assets<WaterMaterial>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     level_path: Res<LevelPath>,
 ) {
@@ -775,11 +860,18 @@ fn setup(
     commands.insert_resource(TerrainMesh(terrain_mesh.clone()));
     commands.spawn((
         Mesh3d(terrain_mesh),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            // White base so the per-vertex height gradient (brown → green) shows.
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.95,
-            ..default()
+        MeshMaterial3d(terrain_materials.add(TerrainMaterial {
+            base: StandardMaterial { perceptual_roughness: 0.95, ..default() },
+            extension: TerrainExt {
+                settings: TerrainSettings {
+                    wet_sand: linear_vec4(Color::srgb(0.55, 0.45, 0.32)),
+                    sand: linear_vec4(Color::srgb(0.80, 0.68, 0.48)),
+                    grass: linear_vec4(Color::srgb(0.30, 0.46, 0.20)),
+                    dry_grass: linear_vec4(Color::srgb(0.56, 0.55, 0.30)),
+                    rock: linear_vec4(Color::srgb(0.47, 0.43, 0.39)),
+                    params: Vec4::new(GROUND_SAND_LINE, GROUND_ROCK_SLOPE, GROUND_GRAIN, 0.0),
+                },
+            },
         })),
         Transform::IDENTITY,
     ));
@@ -853,6 +945,7 @@ fn setup(
         current_name: loaded.name.clone(),
     });
 
+    commands.insert_resource(ActiveScenery(loaded.scenery.clone()));
     commands.insert_resource(Terrain(terrain));
     commands.insert_resource(water);
     commands.insert_resource(WaterMesh(water_handle));
@@ -1076,10 +1169,10 @@ fn handle_click(
 // UI panel: object weights + wave patterns
 // ---------------------------------------------------------------------------
 
-const BTN_OFF: Color = Color::srgb(0.22, 0.24, 0.30);
+pub(crate) const BTN_OFF: Color = Color::srgb(0.22, 0.24, 0.30);
 const BTN_ON: Color = Color::srgb(0.85, 0.72, 0.20);
 const POUR_OFF: Color = Color::srgb(0.15, 0.35, 0.55);
-const POUR_ON: Color = Color::srgb(0.25, 0.65, 0.95);
+pub(crate) const POUR_ON: Color = Color::srgb(0.25, 0.65, 0.95);
 
 fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
     commands
@@ -1312,8 +1405,10 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                     ));
                 });
 
+            scenery::spawn_panel_section(panel);
+
             panel.spawn((
-                Text::new("[Space] pause\n[R] drain\n[F] flood"),
+                Text::new("[Space] pause\n[R] drain + calm storm\n[F] flood"),
                 TextFont { font_size: FontSize::Px(11.0), ..default() },
                 TextColor(Color::srgb(0.65, 0.66, 0.72)),
                 Node { margin: UiRect::top(Val::Px(8.0)), ..default() },
@@ -1468,6 +1563,8 @@ fn switch_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     objects: Query<Entity, With<FloatObject>>,
     walls: Query<Entity, With<Wall>>,
+    mut scenery: ResMut<ActiveScenery>,
+    mut storm: ResMut<Storm>,
     mut label: Query<&mut Text, With<LevelDropdownLabel>>,
     mut commands: Commands,
 ) {
@@ -1491,10 +1588,13 @@ fn switch_level(
     water.ripple.iter_mut().for_each(|v| *v = 0.0);
     water.rvel.iter_mut().for_each(|v| *v = 0.0);
     water.flow.iter_mut().for_each(|v| *v = Vec2::ZERO);
+    storm.elapsed = 0.0;
 
     for entity in objects.iter().chain(walls.iter()) {
         commands.entity(entity).despawn();
     }
+    // The new terrain + scenery list trigger `scenery::rebuild_scenery`.
+    scenery.0 = loaded.scenery.clone();
     for obj in &loaded.objects {
         let cx = obj.x * (W - 1) as f32;
         let cz = obj.z * (D - 1) as f32;
@@ -1756,12 +1856,15 @@ fn run_source(
     source: Res<Source>,
     mut wave: ResMut<Wave>,
     mut surge: ResMut<Surge>,
+    mut storm: ResMut<Storm>,
+    mut rainfall: ResMut<Rainfall>,
     mut water: ResMut<Water>,
 ) {
     if paused.0 {
         return;
     }
-    let mut mult = match wave.pattern {
+    storm.elapsed += DT;
+    let wave_mult = match wave.pattern {
         WavePattern::Flood => 1.0,
         WavePattern::Sine => (0.5 + 0.5 * (time.elapsed_secs() * SINE_FREQ).sin()).max(0.0),
         WavePattern::Random => {
@@ -1774,6 +1877,7 @@ fn run_source(
         }
         WavePattern::Off => 0.0,
     };
+    let mut mult = wave_mult * storm_intensity(storm.elapsed);
     // Only touch `surge` when a surge is running, so its change detection
     // (which drives the button colour) fires just on start and end.
     if surge.remaining > 0.0 {
@@ -1781,13 +1885,33 @@ fn run_source(
         surge.remaining = (surge.remaining - DT).max(0.0);
     }
     if mult > 0.0 {
-        add_water(&mut water, source.x, source.z, source.radius, source.rate * mult * DT, -0.8);
+        let (r, rate) = rain_patch(&source);
+        add_water(&mut water, source.x, source.z, r, rate * mult * DT, -0.8);
     }
+    rainfall.0 = mult;
+}
+
+/// The patch the rain falls on: (radius in cells, depth/sec per cell). It's
+/// `RAIN_SPREAD` × wider than the level's source and pours the same total —
+/// scaled by `RAIN_RATE_SCALE` for every level.
+pub(crate) fn rain_patch(source: &Source) -> (i32, f32) {
+    let r = (source.radius as f32 * RAIN_SPREAD).round() as i32;
+    let narrow = (2 * source.radius + 1) as f32;
+    let wide = (2 * r + 1) as f32;
+    (r, source.rate * RAIN_RATE_SCALE * (narrow / wide).powi(2))
+}
+
+/// The storm's strength `secs` into a level: RAIN_START at first, easing up to
+/// 1.0 (the level's full rate) by RAIN_RAMP_SECS.
+fn storm_intensity(secs: f32) -> f32 {
+    RAIN_START + (1.0 - RAIN_START) * smoothstep(0.0, RAIN_RAMP_SECS, secs)
 }
 
 /// Press R to drain all the water (the source then refills it from empty).
-fn drain_on_key(keys: Res<ButtonInput<KeyCode>>, mut water: ResMut<Water>) {
+/// R drains all the water and restarts the storm from a light shower.
+fn drain_on_key(keys: Res<ButtonInput<KeyCode>>, mut water: ResMut<Water>, mut storm: ResMut<Storm>) {
     if keys.just_pressed(KeyCode::KeyR) {
+        storm.elapsed = 0.0;
         water.depth.iter_mut().for_each(|d| *d = 0.0);
         water.ripple.iter_mut().for_each(|r| *r = 0.0);
         water.rvel.iter_mut().for_each(|v| *v = 0.0);
@@ -1814,6 +1938,39 @@ fn add_water(water: &mut Water, cx: usize, cz: usize, r: i32, amount: f32, rippl
 /// lower-surface neighbours, capped so it never sends more than it holds — so
 /// water flows downhill, pools in the bowl, and settles to a flat surface.
 /// Mass-conserving via a delta buffer (all transfers applied at once).
+/// Add `amount` of water depth to every cell of the square patch of radius `r`
+/// around (cx, cz) — `add_water` without the ripple kick, for `predict_wet`.
+fn pour(depth: &mut [f32], cx: usize, cz: usize, r: i32, amount: f32) {
+    for dz in -r..=r {
+        for dx in -r..=r {
+            let (x, z) = (cx as i32 + dx, cz as i32 + dz);
+            if x >= 0 && z >= 0 && x < W as i32 && z < D as i32 {
+                depth[idx(x as usize, z as usize)] += amount;
+            }
+        }
+    }
+}
+
+/// Which cells the water reaches in the first `secs` seconds of a Flood-pattern
+/// storm (building up as in play) — the same sim the game runs, just without drawing.
+/// Scenery uses it to stay out of the river and the first lakes. Costs ~0.2s
+/// for 8 seconds of sim (see the `opt-level` note in Cargo.toml).
+pub(crate) fn predict_wet(terrain: &[f32], source: &Source, secs: f32) -> Vec<bool> {
+    let mut depth = vec![0.0; W * D];
+    let mut flow = vec![Vec2::ZERO; W * D];
+    for frame in 0..(secs / DT) as usize {
+        let (r, rate) = rain_patch(source);
+        pour(&mut depth, source.x, source.z, r, rate * storm_intensity(frame as f32 * DT) * DT);
+        for _ in 0..FLOW_ITERS {
+            flow_iteration(&mut depth, terrain, W, D, &mut flow);
+        }
+        for x in 0..W {
+            depth[idx(x, D - 1)] = 0.0; // the front edge drains, as in `step_flow`
+        }
+    }
+    depth.iter().map(|&d| d > WET).collect()
+}
+
 fn step_flow(terrain: Res<Terrain>, obstacle: Res<Obstacle>, paused: Res<Paused>, mut water: ResMut<Water>) {
     if paused.0 {
         return;
@@ -2032,33 +2189,19 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
     let off = half();
     let mut positions = vec![[0.0f32; 3]; W * D];
     let mut normals = vec![[0.0f32, 1.0, 0.0]; W * D];
+    // UV_0 isn't a texture coordinate: x carries the height as 0 (lowest) .. 1
+    // (highest) of this level's range, so terrain.wesl can put sand low and
+    // grass high on any heightmap.
     let mut uvs = vec![[0.0f32; 2]; W * D];
-    // Height gradient: light brown in the low streambed → green on the high
-    // banks, so elevation reads clearly.
-    let mut colors = vec![[1.0f32; 4]; W * D];
-    let sand = Color::srgb(0.80, 0.66, 0.44).to_linear();
-    let green = Color::srgb(0.38, 0.52, 0.26).to_linear();
-    // Span the gradient over the actual height range, so any level heightmap
-    // (not just the built-in valley) shades low → high correctly.
-    let max_h = t.iter().fold(0.0f32, |a, &b| a.max(b)).max(1.0);
+    let min_h = t.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_h = t.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     for z in 0..D {
         for x in 0..W {
             let i = idx(x, z);
             positions[i] = [x as f32 * CELL - off, t[i], z as f32 * CELL - off];
-            let hl = t[idx(x.saturating_sub(1), z)];
-            let hr = t[idx((x + 1).min(W - 1), z)];
-            let hu = t[idx(x, z.saturating_sub(1))];
-            let hd = t[idx(x, (z + 1).min(D - 1))];
-            let n = Vec3::new(hl - hr, 2.0 * CELL, hu - hd).normalize();
+            let n = terrain_normal(t, x, z);
             normals[i] = [n.x, n.y, n.z];
-            uvs[i] = [0.0, 0.0];
-            let g = (t[i] / max_h).clamp(0.0, 1.0);
-            colors[i] = [
-                sand.red + (green.red - sand.red) * g,
-                sand.green + (green.green - sand.green) * g,
-                sand.blue + (green.blue - sand.blue) * g,
-                1.0,
-            ];
+            uvs[i] = [height_fraction(t[i], min_h, max_h), 0.0];
         }
     }
     let mut indices: Vec<u32> = Vec::with_capacity((W - 1) * (D - 1) * 6);
@@ -2075,7 +2218,6 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
 }
@@ -2095,6 +2237,47 @@ mod tests {
         }
         assert!(seen == [WavePattern::Flood, WavePattern::Sine, WavePattern::Random, WavePattern::Off]);
         assert!(p.next() == WavePattern::Flood);
+    }
+
+    #[test]
+    fn predict_wet_reaches_downhill_but_not_the_hills() {
+        let t = builtin_level().heights;
+        let source = Source { x: channel_center(4).round() as usize, z: 4, radius: SOURCE_R, rate: SOURCE_RATE };
+        let wet = predict_wet(&t, &source, 4.0);
+        assert!(wet[idx(source.x, source.z)], "the source itself is wet");
+        assert!(!wet[idx(2, D / 2)], "the high bank at the map's side stays dry");
+        assert_eq!(wet, predict_wet(&t, &source, 4.0), "same terrain → same prediction");
+    }
+
+    #[test]
+    fn rain_patch_is_wider_and_pours_the_scaled_total() {
+        let source = Source { x: 50, z: 50, radius: 5, rate: 110.0 };
+        let (r, rate) = rain_patch(&source);
+        assert!(r > source.radius);
+        let total = |radius: i32, rate: f32| ((2 * radius + 1) as f32).powi(2) * rate;
+        assert!((total(r, rate) - RAIN_RATE_SCALE * total(source.radius, source.rate)).abs() < 1e-2);
+    }
+
+    #[test]
+    fn storm_starts_light_and_builds_to_the_full_rate() {
+        assert_eq!(storm_intensity(0.0), RAIN_START);
+        assert_eq!(storm_intensity(RAIN_RAMP_SECS), 1.0);
+        assert_eq!(storm_intensity(RAIN_RAMP_SECS * 3.0), 1.0, "stays at full strength");
+        let mut prev = 0.0;
+        for i in 0..=100 {
+            let now = storm_intensity(i as f32 * RAIN_RAMP_SECS / 100.0);
+            assert!(now >= prev, "never eases off while building");
+            prev = now;
+        }
+    }
+
+    #[test]
+    fn height_fraction_spans_the_level_range() {
+        assert_eq!(height_fraction(10.0, 10.0, 50.0), 0.0);
+        assert_eq!(height_fraction(50.0, 10.0, 50.0), 1.0);
+        assert_eq!(height_fraction(30.0, 10.0, 50.0), 0.5);
+        // A flat level has no range: everything is "lowest" (sand), not NaN.
+        assert_eq!(height_fraction(7.0, 7.0, 7.0), 0.0);
     }
 
     #[test]
@@ -2316,7 +2499,7 @@ mod tests {
         objects: Vec<ObjectConfig>,
     ) {
         let heights = (0..W * D).map(|i| h(i % W, i / W)).collect();
-        let level = LoadedLevel { name: name.into(), heights, source, objects };
+        let level = LoadedLevel { name: name.into(), heights, source, objects, scenery: vec![SceneryKind::Trees] };
         level::write_template(path, &level, W, D).unwrap();
     }
 

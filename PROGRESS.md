@@ -317,11 +317,14 @@ Parked as a reference — not the direction.
 ## Current File Structure (heightfield game)
 ```
 src/
-  main.rs    — window/config + add_plugins(FloodPlugin)
-  flood.rs   — the whole game: terrain, water sim, objects, render, UI, camera (single module)
-  config.rs  — AppConfig (window size + level path, from config.yaml)
-  level.rs   — level yaml + PNG heightmap loading
-assets/shaders/water.wgsl — custom water material
+  main.rs     — window/config + add_plugins(FloodPlugin, SceneryPlugin, RainPlugin)
+  flood.rs    — terrain, water sim, objects, render, UI, camera; shared helpers are pub(crate)
+  scenery.rs  — scenery sets (trees / city / ruins): pure placement + rebuild system + panel buttons
+  rain.rs     — the source drawn as a rain cloud with falling rain (visual only)
+  config.rs   — AppConfig (window size + level path, from config.yaml)
+  level.rs    — level yaml + PNG heightmap loading (incl. `scenery:` list)
+assets/shaders/water.wesl   — custom water material
+assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slope, noise)
 ```
 
 ### Session 18 (Erase, height/depth gradients, docs)
@@ -565,7 +568,40 @@ assets/shaders/water.wgsl — custom water material
   `/tmp/wf_shoot.sh` (inject → run → restore). The user's default zoomed-out view caught the
   aliasing + solid-wall problems that close-ups missed — always check the default camera too.
 
+### Session 27 (Ground cover, scenery sets, rain-cloud storm)
+
+- **Ground cover shader** (`terrain.wesl`, `TerrainMaterial` = `ExtendedMaterial` like the water) —
+  per-pixel sand → grass by height, bare rock on slopes steeper than ~53°, large noise blotches
+  (dry/lush grass, wandering sand line) + fine grain that fades with `fwidth` (no aliasing). Height
+  fraction is baked into the terrain mesh's UV.x so a level switch needs no uniform update.
+  Lesson: `patch` is a reserved WGSL word — shader errors only show at `cargo run`, not build.
+- **Scenery sets** (`src/scenery.rs`, first split out of `flood.rs`) — trees (jittered grid + grove
+  noise, pines higher up), city (grid town, streets every 3rd lot, taller toward the centre, pyramid
+  roofs), ruins (broken foundations, colonnades, rubble). Level yaml `scenery: [trees, city]`
+  (default `[trees]`), SCENERY panel toggles live. Fixed order city → ruins → trees sharing an
+  `Occupancy` grid. Placement is pure (`plan_scenery`) and unit-tested; `hash01` makes it
+  deterministic.
+  - **Bevy:** change detection (`is_changed`) drives `rebuild_scenery`; `Local<T>` caches the wet
+    prediction across button toggles; `children![]` + recursive despawn; shared mesh/material
+    handles so hundreds of trees batch.
+  - **Rust:** `let mut` for closures that mutate captures; use data before moving it into a
+    resource; `.run_if()` chained twice (no `.and` in the prelude).
+- **Placement measured, not guessed** — a throwaway test ran the sim and counted submerged scenery:
+  the first town was 100% underwater at 5 s. Fix: `flood::predict_wet` runs the real sim for
+  `DRY_SECS` (8 s) at load; nothing goes on wet cells + 1-cell margin. Needed `opt-level = 1` for
+  our crate (sim ~1 s+ at opt 0 → 0.2–0.6 s). Towns now stay dry ≥15 s on all but Cascades.
+- **Rain-cloud source** (`src/rain.rs`) — low-poly cloud over the source, white → storm grey with
+  the rain, raindrop pool whose positions are computed from time + index (no per-drop state).
+  - **Storm ramp:** inflow starts at `RAIN_START` (25%) and eases to full over `RAIN_RAMP_SECS`
+    (45 s); R / level switch calm the storm. `RAIN_RATE_SCALE` = 0.75 cuts every level's rate.
+  - **Water hill fixed:** the source used to pour into an 11×11 patch, piling an 80+ unit mound
+    that swallowed the cloud; rain now spreads `RAIN_SPREAD` (2.5×) wider with the same total.
+
 ## Where We Left Off (current)
+
+**Session 27 (`feat/ground-cover`)** — ground cover shader, scenery sets (trees / city / ruins,
+yaml + panel, decoration only), rain-cloud source with a building storm at 75% of the old rate.
+Next: scenery destruction.
 
 **Session 26 (`fix/waterfall-visible`)** — waterfalls render as white-water curtains; on Bevy
 0.20 / Rust 1.99.1.
@@ -602,7 +638,9 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 `impl` methods on enums (`next()`) keep cycle logic testable.
 
 ## What Comes Next
-- **Scenery realism** — textured terrain (sand/grass blend by height + slope), fix the grey band
+- **Scenery destruction (next)** — buildings/ruins block water like grounded blocks, then get
+  undermined / washed away by strong currents; trees knocked down. Ties into Object destruction.
+- **Scenery realism** — ~~textured terrain~~ done (session 27); fix the grey band
   past the map edge (larger surround terrain or far backdrop), shore foam where flow is fast,
   optionally planar reflections of banks/blocks.
 - **Walls (optional)** — weight-based walls that can be undermined/washed away; curved/polyline walls.
