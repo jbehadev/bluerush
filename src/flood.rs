@@ -66,7 +66,7 @@ const OBJ_HEIGHT_MAX: f32 = 28.0; // height of the heaviest block
 const BUOYANCY: f32 = 400.0; // water depth × this = weight it can float (generous; contrast comes from mobility)
 const DRAFT: f32 = 2.5; // how deep a floating object sits below the surface
 const VERT_EASE: f32 = 0.15; // how fast an object eases toward its target height
-const FLOW_TO_SPEED: f32 = 80.0; // converts the local current into a drift speed
+pub(crate) const FLOW_TO_SPEED: f32 = 80.0; // converts the local current into a drift speed
 const FLOW_EASE: f32 = 0.12; // how fast an object's velocity matches the current
 const REF_WEIGHT: f32 = 150.0; // a "light" object; mobility = REF_WEIGHT / weight (capped at 1)
 
@@ -87,8 +87,8 @@ const RAIN_SPREAD: f32 = 2.5;
 const RAIN_RATE_SCALE: f32 = 0.75; // overall rain volume vs each level's yaml `rate` (all levels)
 const FLOW_RATE: f32 = 0.5; // fraction of the surface gap equalised per iteration
 const FLOW_ITERS: usize = 8; // flow iterations per frame (faster spreading = no spike)
-const DT: f32 = 1.0 / 60.0;
-const WET: f32 = 0.15; // depth below which a column is treated as dry
+pub(crate) const DT: f32 = 1.0 / 60.0;
+pub(crate) const WET: f32 = 0.15; // depth below which a column is treated as dry
 
 // Visual-only ripple layer.
 const RIPPLE_SPEED: f32 = 0.25;
@@ -257,6 +257,14 @@ pub(crate) struct Water {
     flow: Vec<Vec2>,
 }
 
+impl Water {
+    /// The current at cell `i` in world units/sec (x, z) — what carries a
+    /// floating object along.
+    pub(crate) fn current(&self, i: usize) -> Vec2 {
+        self.flow[i] * FLOW_TO_SPEED
+    }
+}
+
 #[derive(Resource)]
 struct WaterMesh(Handle<Mesh>);
 
@@ -349,6 +357,15 @@ struct WallDrag {
 #[derive(Resource)]
 struct ObjectAssets {
     cube: Handle<Mesh>,
+}
+
+/// Something that dams the flow besides blocks and walls (standing scenery):
+/// each cell in `cells` is walled up to world height `top`. Remove it (or
+/// lower `top`) and the water flows through again.
+#[derive(Component)]
+pub(crate) struct Blocker {
+    pub(crate) cells: Vec<usize>,
+    pub(crate) top: f32,
 }
 
 /// Per-cell extra floor height contributed by grounded objects. Raises the
@@ -954,16 +971,25 @@ fn setup(
     commands.insert_resource(source);
 }
 
-/// Mark cells under grounded (can't-float) objects as raised floor, so the flow
-/// dams behind them and diverts around. Floating objects don't obstruct.
+/// Mark cells under grounded (can't-float) objects, walls and standing scenery
+/// as raised floor, so the flow dams behind them and diverts around. Floating
+/// objects don't obstruct.
 fn build_obstacles(
+    terrain: Res<Terrain>,
     water: Res<Water>,
     objs: Query<&FloatObject>,
     walls: Query<&Wall>,
+    blockers: Query<&Blocker>,
     mut obstacle: ResMut<Obstacle>,
 ) {
     for o in obstacle.0.iter_mut() {
         *o = 0.0;
+    }
+    // Standing scenery (buildings, ruin walls): raise each cell up to its top.
+    for b in &blockers {
+        for &c in &b.cells {
+            obstacle.0[c] = obstacle.0[c].max(b.top - terrain.0[c]);
+        }
     }
     // Walls always dam: raise every cell whose centre lies inside the wall's
     // rectangle (within half the thickness of the a–b line, between the ends).
