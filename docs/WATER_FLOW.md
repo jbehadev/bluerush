@@ -142,11 +142,25 @@ A single deforming mesh (`W × D` vertices) is rebuilt each frame:
   catches light (the "watery" sheen).
 - Only **wet** quads are emitted — any corner with `depth > WET` — giving a clean
   shoreline; dry columns sit at terrain height so the water tapers to the bank.
-- A translucent, low-roughness `StandardMaterial` (white base, so per-vertex
-  colours drive the look) lets the floor show through.
-- **Depth shading** — per-vertex colour lerps **shallow → deep** (light, clear
-  blue → dark, more opaque, reaching darkest at `DEPTH_COLOR_MAX`), so pooled and
-  dammed water reads as deep while the flowing sheet reads as shallow.
+- Each vertex's `UV_0` carries the local **current** (`flow * FLOW_TO_SPEED`,
+  world units/sec) instead of texture coordinates, for the shader below.
+- The material is `WaterMaterial` = `ExtendedMaterial<StandardMaterial, WaterExt>`
+  with the custom fragment shader **`assets/shaders/water.wgsl`**. Bevy does the
+  lighting; the shader adjusts its inputs per pixel:
+  - **Depth colour** — the camera's `DepthPrepass` gives the terrain depth behind
+    each water pixel; the gap is the water thickness along the view ray, and
+    Beer–Lambert absorption (`WATER_ABSORPTION`) blends the shallow (clear) colour
+    into the deep (murky teal) one.
+  - **Ripples** — animated gradient noise tilts the normal (`RIPPLE_STRENGTH`,
+    `RIPPLE_SIZE`), dragged downstream along the current by a two-phase flow map.
+  - **Shore** — alpha fades out as thickness → 0 (`SHORE_FADE`) and on
+    near-vertical triangles stretched up wall/block faces.
+  - **Two lighting passes** — the body colour is lit with the smooth normal (no
+    reflection); the reflection/sun glints with the rippled normal, kept from
+    tilting below the horizon. Lighting the body with ripples caused dark flecks.
+- The camera has a physical `Atmosphere` sky + `AtmosphereEnvironmentMapLight`,
+  so reflections show sky; the sun is real-strength (`lux::RAW_SUNLIGHT`) with
+  shadows, balanced by `Exposure`, ACES tonemapping and bloom.
 
 `step_ripples` drives the `ripple` field with a small damped wave equation
 (`RIPPLE_SPEED`, `RIPPLE_DAMP`, capped at `MAX_RIPPLE`) purely for visual
@@ -216,7 +230,7 @@ pour/erase (`draw_placement_cursor`).
 `CHANNEL_HW`, `BANK_K`, `BANK_MAX` (terrain) · `SOURCE_RATE`, `SINE_FREQ`,
 `RANDOM_INTERVAL` (source) · `FLOW_RATE`, `FLOW_ITERS`, `WET` (flow) ·
 `RIPPLE_SPEED`, `RIPPLE_DAMP`, `MAX_RIPPLE`, `RIPPLE_FADE` (ripples) ·
-`DEPTH_COLOR_MAX` (water depth shading) ·
+`WATER_ABSORPTION`, `SHORE_FADE`, `RIPPLE_STRENGTH`, `RIPPLE_SIZE` (water look) ·
 `BUOYANCY`, `DRAFT`, `VERT_EASE`, `FLOW_TO_SPEED`, `FLOW_EASE`, `REF_WEIGHT`
 (objects) · `OBJ_FOOTPRINT_MIN/MAX`, `OBJ_HEIGHT_MIN/MAX` (weight→size) ·
 `PANEL_WIDTH`, `WEIGHTS` (UI).
