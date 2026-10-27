@@ -14,16 +14,18 @@
 //   3. Shoreline — where that thickness falls to zero the water fades out, so the
 //                 edge blends into the terrain instead of ending in a hard line.
 
-#import bevy_pbr::{
+//
+// Written in WESL (Bevy 0.20+): `import` statements come first, module paths
+// follow the file layout inside each crate, and `@if(FLAG)` replaces `#ifdef`.
+
+import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
     forward_io::{VertexOutput, FragmentOutput},
     mesh_view_bindings::globals,
     view_transformations::depth_ndc_to_view_z,
-}
-#ifdef DEPTH_PREPASS
-#import bevy_pbr::prepass_utils::prepass_depth
-#endif
+};
+@if(DEPTH_PREPASS) import bevy_pbr::prepass::utils::prepass_depth;
 
 // Must match `WaterSettings` in flood.rs field-for-field.
 struct WaterSettings {
@@ -36,7 +38,7 @@ struct WaterSettings {
     params: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> water: WaterSettings;
+@group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> water: WaterSettings;
 
 // --- Noise -----------------------------------------------------------------
 
@@ -122,14 +124,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     // 2. How much water lies between the surface and whatever is behind it.
     var thickness = 1.0e4;
-#ifdef DEPTH_PREPASS
-    let scene_ndc = prepass_depth(in.position, 0u);
-    if scene_ndc > 0.0 { // 0 = nothing drawn behind (reverse-Z far plane)
-        let scene_z = depth_ndc_to_view_z(scene_ndc);
-        let water_z = depth_ndc_to_view_z(in.position.z);
-        thickness = max(water_z - scene_z, 0.0); // view-space z is negative ahead of the camera
+    @if(DEPTH_PREPASS) {
+        let scene_ndc = prepass_depth(in.position, 0u);
+        if scene_ndc > 0.0 { // 0 = nothing drawn behind (reverse-Z far plane)
+            let scene_z = depth_ndc_to_view_z(scene_ndc);
+            let water_z = depth_ndc_to_view_z(in.position.z);
+            thickness = max(water_z - scene_z, 0.0); // view-space z is negative ahead of the camera
+        }
     }
-#endif
     let absorb = 1.0 - exp(-thickness * water.params.x);
     let body = mix(water.shallow_color, water.deep_color, absorb);
 

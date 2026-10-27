@@ -46,7 +46,7 @@ src/
   flood.rs  — FloodPlugin: terrain, water sim, objects, walls, UI, camera, input
   level.rs  — Level yaml + PNG heightmap loading
 levels/     — Shipped levels (*.yaml + *.png heightmaps)
-assets/     — shaders/water.wgsl (custom water material)
+assets/     — shaders/water.wesl (custom water material)
 docs/       — WATER_FLOW.md (how the sim works), LEVELS.md (level format)
 ```
 
