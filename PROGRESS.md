@@ -597,7 +597,39 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
   - **Water hill fixed:** the source used to pour into an 11×11 patch, piling an 80+ unit mound
     that swallowed the cloud; rain now spreads `RAIN_SPREAD` (2.5×) wider with the same total.
 
+### Session 28 (Scenery destruction)
+- **The water breaks scenery** (`src/scenery.rs`). Trees, buildings, ruin walls and standing
+  columns are `Breakable`; each frame `wear_scenery` measures the water's push on them.
+  - **Physics:** `water_load` = **drag** (depth × (speed / LOAD_SPEED)²) + **head** (water standing
+    higher on one side, capped at its depth). Still, level water pushes evenly from all sides →
+    no net force, so trees survive a calm lake. (First version counted plain depth as push —
+    every wetted tree fell; measuring showed it, physics fixed it.)
+  - **Wear:** above `strength`, health drains (2× strength breaks it in `BREAK_SECS` = 2 s) and
+    the piece leans downstream (`tipped`: rotate about its base pivot toward the push).
+  - **Collapse:** trees/columns/ruin walls topple with the current (accelerating fall); buildings
+    crumble (squash + tilt) and shed 4 chunks. Fallen trees + chunks become `Debris` that floats
+    on the current and sinks away after 45 s or at the map edge. R rebuilds the scenery.
+  - **Damming:** buildings and ruin walls carry a `Blocker` (cells + world-height top) that
+    `flood::build_obstacles` raises — water backs up behind the town. A crumbled building keeps a
+    low rubble Blocker; a toppled wall loses it.
+- **Bevy:** a piece's lifecycle is components — `Breakable` → `Collapsing` → `Debris` — added and
+  removed with `Commands`; each system only queries its stage. `run_if` with a closure
+  (`|paused: Res<Paused>| !paused.0`). **Crash learned:** commands are applied later, so a
+  `rebuild_scenery` despawn in the same frame invalidated an insert → panic. Fix: `try_insert`,
+  `try_remove`, `try_despawn` (silently skip despawned entities).
+- **Rust:** `impl Fn(usize) -> Vec2` parameters keep `water_load` pure/testable (tests pass a
+  closure, the game passes `|c| water.current(c)`); `normalize_or_zero` / `normalize_or`.
+- **Tuning by measurement:** a throwaway test ran the real sim 150 s on all six levels with every
+  set and counted pieces broken by 30/60/90/150 s. Final strengths: tree 6 × scale, building
+  1.5 × footprint side, ruin wall 20, column 10. Full storms wreck most flooded scenery by ~90 s;
+  towns on Valley/River Delta sit above the flood (need FLOOD! surges / walls to reach them).
+- Tests: 50 (+6: load model, wear, tipping direction, blocker footprints).
+
 ## Where We Left Off (current)
+
+**Session 28 (`feat/scenery-destruction`)** — scenery dams the water and is broken by it (topple,
+crumble, debris that floats away). Next: object destruction, or polish (splash/dust when things
+fall, cracks/tint as health drops).
 
 **Session 27 (`feat/ground-cover`)** — ground cover shader, scenery sets (trees / city / ruins,
 yaml + panel, decoration only), rain-cloud source with a building storm at 75% of the old rate.
@@ -638,8 +670,10 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 `impl` methods on enums (`next()`) keep cycle logic testable.
 
 ## What Comes Next
-- **Scenery destruction (next)** — buildings/ruins block water like grounded blocks, then get
-  undermined / washed away by strong currents; trees knocked down. Ties into Object destruction.
+- ~~**Scenery destruction**~~ Done (session 28). Possible polish: splash/dust puffs on collapse,
+  damage tint/cracks, debris colliding with blocks/walls, debris jams that dam.
+- **Object destruction (next)** — reuse `water_load` + `wear` for player blocks/walls: a strong
+  enough current sweeps away or breaks them.
 - **Scenery realism** — ~~textured terrain~~ done (session 27); fix the grey band
   past the map edge (larger surround terrain or far backdrop), shore foam where flow is fast,
   optionally planar reflections of banks/blocks.
@@ -654,6 +688,5 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 - **Buttons → observers (optional, learning)** — rewrite the panel handlers as `On<Activate>`
   observers, the 0.20-native pattern.
   Known 0.20 change: pointer events flattened (`Pointer<Press>` → `PointerPress`).
-- **Object destruction** — a strong enough current sweeps away or breaks objects.
 - ~~**Levels** — author terrain heightmaps; save/load.~~ Done (session 20): PNG heightmap +
   yaml levels, see `docs/LEVELS.md`. Remaining: more shipped levels, in-game level picker.

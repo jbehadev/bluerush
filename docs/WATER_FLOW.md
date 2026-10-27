@@ -125,6 +125,13 @@ the block and **diverts around** it. Block height and footprint scale with weigh
 the water fills to the block's top it **overtops** and spills over.
 
 > Floating blocks don't obstruct (they ride on top), which keeps it physical.
+
+Walls and **standing scenery** dam the same way. Scenery carries a `Blocker`
+component (cells + a world-height `top`) that `build_obstacles` raises each
+frame: buildings up to their eaves, ruin walls to their tops. When a building
+crumbles its `Blocker` drops to a low rubble mound; a toppled wall loses it, and
+the water runs through. (The water's push that breaks them — `water_load`,
+drag + head — lives in `scenery.rs`; see `PROGRESS.md` session 28.)
 >
 > *Known limitation:* overtopping currently shows as the water level rising
 > against the dam and spilling around/over — not a literal cresting sheet on top
@@ -213,7 +220,7 @@ pour/erase (`draw_placement_cursor`).
 - `add_water` — deposit depth + kick ripples in a patch
 - `step_flow` — the relaxation flow + current field + edge drain
 - `step_ripples` — visual ripple wave equation
-- `build_obstacles` — grounded-block damming floor
+- `build_obstacles` — damming floor from grounded blocks, walls and scenery `Blocker`s
 - `update_water_mesh` — rebuild the clipped, lit water surface
 
 **Objects**
