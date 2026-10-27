@@ -1,0 +1,18 @@
+name: Winding River
+heightmap: winding-river.png
+height_scale: 175.0
+source:
+  x: 0.6750886
+  z: 0.026845638
+  radius: 4
+  rate: 120.0
+objects:
+- x: 0.22914909
+  z: 0.2
+  weight: 150.0
+- x: 0.22611721
+  z: 0.45
+  weight: 800.0
+- x: 0.36008424
+  z: 0.65
+  weight: 3000.0
