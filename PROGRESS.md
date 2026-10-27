@@ -427,7 +427,44 @@ src/
 - **Tests** — `closest_on_segment` helper unit-tested (6 passing + 3 ignored level generators).
 - **Concepts** — parent/child entities, per-frame state in a resource, point-to-segment distance.
 
+### Session 22 (Realistic water rendering)
+
+- **Goal** — make the water look like real water (reference: a translucent green river reflecting
+  the sky) instead of a flat tinted sheet.
+- **Sky + sunlight** — camera gets `Atmosphere::earthlike` (physically based sky; needs a
+  `ScatteringMedium` asset) + `AtmosphereEnvironmentMapLight` (lights the scene *and* gives the water
+  a sky to reflect). Sun is `lux::RAW_SUNLIGHT` with shadows + a `CascadeShadowConfig` spanning the
+  map; `Exposure { ev100: 14.2 }` + `Tonemapping::AcesFitted` + `Bloom::NATURAL` keep it from
+  blowing out. `DepthPrepass` on the camera writes terrain/object depth before the water draws.
+- **First custom shader** — `assets/shaders/water.wgsl`, plugged in via
+  `ExtendedMaterial<StandardMaterial, WaterExt>` (`type WaterMaterial`, registered with
+  `MaterialPlugin`). Bevy still does the lighting; the shader only changes its inputs:
+  - **Depth colour** — thickness of water along the view ray = water depth − prepass depth;
+    Beer–Lambert `1 − exp(−thickness·absorption)` blends clear shallow → murky teal deep.
+  - **Flowing ripples** — gradient-noise height → slope → tilted normal. The mesh's spare `UV_0`
+    channel carries the current (`flow * FLOW_TO_SPEED`), and a two-phase "flow map" drags the noise
+    downstream without smearing.
+  - **Soft shore** — alpha fades as thickness → 0, and on near-vertical triangles (wall faces).
+- **Bug hunt: "seeds" in the water** — three causes, three fixes: (1) ripples were shading the
+  *body* colour → light it in two passes (body with the smooth normal, shine/reflection with the
+  rippled one); (2) fast flow stretched noise into hairs → cap drag speed + shorter cycle;
+  (3) steep ripples reflected the dark ground below the horizon → ease the normal back until the
+  reflection points at the sky.
+- **Debug technique** — macOS blocked `screencapture`, so a throwaway system used Bevy's
+  `Screenshot::primary_window()` + `save_to_disk` to grab frames for side-by-side checks.
+- **Concepts** — WGSL basics, `#import`/`#ifdef` shader defs, `AsBindGroup` + `ShaderType` uniforms
+  (binding 100+ to avoid StandardMaterial's slots), linear vs sRGB colour, reverse-Z depth,
+  Fresnel, physically based exposure.
+- **New tunables** — `WATER_ABSORPTION`, `SHORE_FADE`, `RIPPLE_STRENGTH`, `RIPPLE_SIZE`
+  (replace `DEPTH_COLOR_MAX`); shallow/deep colours + `reflectance` in `setup`.
+
 ## Where We Left Off (current)
+
+**Session 22 (`feat/realistic-water`)** — water now renders with a custom shader: translucent,
+depth-tinted teal, flowing ripples, sky reflections from a physical atmosphere, sun shadows. Known
+visual gaps: a grey band beyond the map edge (atmosphere's planet ground below the horizon); water
+reflects only the sky, not banks/blocks (SSR needs opaque materials); flat-coloured terrain.
+
 
 Weir-model overtopping done on `feat/heightfield-water`: water backs up behind a grounded block and
 crests over it as a continuous sheet (lighter/shorter blocks crest readily; tall heavy blocks mostly
@@ -447,6 +484,9 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 `impl` methods on enums (`next()`) keep cycle logic testable.
 
 ## What Comes Next
+- **Scenery realism** — textured terrain (sand/grass blend by height + slope), fix the grey band
+  past the map edge (larger surround terrain or far backdrop), shore foam where flow is fast,
+  optionally planar reflections of banks/blocks.
 - **Walls (optional)** — weight-based walls that can be undermined/washed away; curved/polyline walls.
 - **Crest-edge polish (optional)** — the upstream overtopping sheet sticks out ~1 cell past the
   block back; needs finer geometry near obstacles if it ever bothers us.

@@ -12,8 +12,16 @@
 //!
 //! Controls:  hold LEFT MOUSE to pour water at the cursor   •   R to drain
 
+use bevy::camera::Exposure;
+use bevy::core_pipeline::prepass::DepthPrepass;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder};
+use bevy::pbr::{Atmosphere, ExtendedMaterial, MaterialExtension, ScatteringMedium};
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::shader::ShaderRef;
 use bevy_asset::RenderAssetUsages;
 use bevy_mesh::{Indices, PrimitiveTopology};
 use std::collections::HashMap;
@@ -75,7 +83,12 @@ const RIPPLE_SPEED: f32 = 0.25;
 const RIPPLE_DAMP: f32 = 0.96;
 const MAX_RIPPLE: f32 = 4.0;
 const RIPPLE_FADE: f32 = 5.0; // ripples fade out in water shallower than this
-const DEPTH_COLOR_MAX: f32 = 25.0; // depth at which water reaches its darkest/most opaque
+
+// Water look (see assets/shaders/water.wgsl).
+const WATER_ABSORPTION: f32 = 0.10; // murkiness per world unit of water the view ray crosses
+const SHORE_FADE: f32 = 1.5; // water this thin (world units) fades into the terrain
+const RIPPLE_STRENGTH: f32 = 0.12; // how far ripples tilt the surface normal
+const RIPPLE_SIZE: f32 = 10.0; // world units per ripple-noise cell
 
 fn span() -> f32 {
     (W - 1) as f32 * CELL
@@ -218,6 +231,33 @@ struct Water {
 
 #[derive(Resource)]
 struct WaterMesh(Handle<Mesh>);
+
+/// The water's material: Bevy's StandardMaterial (lighting, reflections) plus
+/// our own fragment shader that adds ripples, depth colour and a soft shore.
+type WaterMaterial = ExtendedMaterial<StandardMaterial, WaterExt>;
+
+/// Extra data the water shader reads on top of StandardMaterial. Binding 100+
+/// keeps clear of the slots StandardMaterial itself uses.
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
+struct WaterExt {
+    #[uniform(100)]
+    settings: WaterSettings,
+}
+
+/// GPU-side layout must match `struct WaterSettings` in water.wgsl.
+#[derive(ShaderType, Debug, Clone)]
+struct WaterSettings {
+    shallow_color: Vec4,
+    deep_color: Vec4,
+    /// x = absorption, y = shore fade, z = ripple strength, w = ripple size
+    params: Vec4,
+}
+
+impl MaterialExtension for WaterExt {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/water.wgsl".into()
+    }
+}
 
 /// A weighted object that rests on the terrain and floats / gets carried once
 /// the water is deep enough to lift its weight.
@@ -541,6 +581,7 @@ impl Plugin for FloodPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(LevelPath(self.level.clone()))
             .insert_resource(ClearColor(Color::srgb(0.45, 0.62, 0.78)))
+            .add_plugins(MaterialPlugin::<WaterMaterial>::default())
             .insert_resource(SelectedTool::Object(500.0))
             .insert_resource(Wave { pattern: WavePattern::Flood, rng_level: 1.0, since_roll: 0.0 })
             .insert_resource(Paused(false))
@@ -595,16 +636,36 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut water_materials: ResMut<Assets<WaterMaterial>>,
+    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     level_path: Res<LevelPath>,
 ) {
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 360.0, 470.0).looking_at(Vec3::ZERO, Vec3::Y),
+        // Physically based sky + haze. World units are treated as metres.
+        Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
+        // Light the scene (and the water's reflections) from that sky.
+        AtmosphereEnvironmentMapLight::default(),
+        // Real sunlight is ~100k lux, so expose like a camera on a sunny day.
+        Exposure { ev100: 14.2 },
+        Tonemapping::AcesFitted,
+        Bloom::NATURAL,
+        // Depth of the terrain/objects, so the water shader can tell how deep
+        // the water is at each pixel.
+        DepthPrepass,
     ));
     commands.insert_resource(OrbitCamera { focus: Vec3::ZERO, yaw: 0.0, pitch: 0.65, distance: 592.0 });
     commands.spawn((
-        DirectionalLight { illuminance: 11000.0, shadows_enabled: false, ..default() },
+        DirectionalLight { illuminance: lux::RAW_SUNLIGHT, shadows_enabled: true, ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.9, 0.5, 0.0)),
+        // Spread the shadow map over the whole ~600-unit map.
+        CascadeShadowConfigBuilder {
+            first_cascade_far_bound: 300.0,
+            maximum_distance: 1500.0,
+            ..default()
+        }
+        .build(),
     ));
 
     // Terrain comes from the configured level (heightmap PNG + yaml). If the
@@ -655,22 +716,32 @@ fn setup(
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; W * D]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; W * D]);
+    // UV_0 doesn't hold texture coordinates here: it carries the local current
+    // (world units/sec) so the shader can make ripples flow downstream.
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; W * D]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.2f32, 0.4, 0.7, 0.5]; W * D]);
     mesh.insert_indices(Indices::U32(Vec::new()));
     let water_handle = meshes.add(mesh);
     commands.spawn((
         Mesh3d(water_handle.clone()),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            // White base so the per-vertex depth gradient (shallow → deep) drives the colour.
-            base_color: Color::WHITE,
-            alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 0.04,
-            reflectance: 0.65,
-            cull_mode: None,
-            ..default()
+        MeshMaterial3d(water_materials.add(WaterMaterial {
+            base: StandardMaterial {
+                alpha_mode: AlphaMode::Blend,
+                perceptual_roughness: 0.06,
+                reflectance: 0.7, // real water is ~0.35; exaggerated so ripples read from up high
+                cull_mode: None,
+                ..default()
+            },
+            extension: WaterExt {
+                settings: WaterSettings {
+                    shallow_color: linear_vec4(Color::srgba(0.36, 0.62, 0.56, 0.30)),
+                    deep_color: linear_vec4(Color::srgba(0.07, 0.30, 0.29, 0.95)),
+                    params: Vec4::new(WATER_ABSORPTION, SHORE_FADE, RIPPLE_STRENGTH, RIPPLE_SIZE),
+                },
+            },
         })),
         Transform::IDENTITY,
+        // A transparent surface shouldn't darken the bed with a solid shadow.
+        bevy::light::NotShadowCaster,
     ));
 
     // Object spawning assets + the level's starting objects (the built-in
@@ -1798,6 +1869,12 @@ fn step_ripples(paused: Res<Paused>, mut water: ResMut<Water>) {
     }
 }
 
+/// A colour as linear RGBA, the space shaders do their maths in.
+fn linear_vec4(c: Color) -> Vec4 {
+    let l = c.to_linear();
+    Vec4::new(l.red, l.green, l.blue, l.alpha)
+}
+
 /// Rebuild the water surface mesh from depth (+ visual ripple). Vertex height =
 /// terrain + depth + ripple; only quads with water are emitted (clean shore).
 fn update_water_mesh(
@@ -1825,10 +1902,9 @@ fn update_water_mesh(
 
     let mut positions = vec![[0.0f32; 3]; W * D];
     let mut normals = vec![[0.0f32, 1.0, 0.0]; W * D];
-    let mut colors = vec![[0.0f32; 4]; W * D];
-    // Depth shading: shallow water is light and clear, deep water dark and more opaque.
-    let shallow = Color::srgba(0.42, 0.64, 0.86, 0.42).to_linear();
-    let deep = Color::srgba(0.02, 0.16, 0.40, 0.85).to_linear();
+    // Colour now comes from the shader (true per-pixel depth); per vertex we
+    // only send the current, so ripples can flow with it.
+    let mut currents = vec![[0.0f32; 2]; W * D];
     for z in 0..D {
         for x in 0..W {
             let i = idx(x, z);
@@ -1839,13 +1915,8 @@ fn update_water_mesh(
             let hd = surf(idx(x, (z + 1).min(D - 1)));
             let n = Vec3::new(hl - hr, 2.0 * CELL, hu - hd).normalize();
             normals[i] = [n.x, n.y, n.z];
-            let dt = (d[i] / DEPTH_COLOR_MAX).clamp(0.0, 1.0);
-            colors[i] = [
-                shallow.red + (deep.red - shallow.red) * dt,
-                shallow.green + (deep.green - shallow.green) * dt,
-                shallow.blue + (deep.blue - shallow.blue) * dt,
-                shallow.alpha + (deep.alpha - shallow.alpha) * dt,
-            ];
+            let v = water.flow[i] * FLOW_TO_SPEED; // same speed floating objects drift at
+            currents[i] = [v.x, v.y];
         }
     }
 
@@ -1868,7 +1939,7 @@ fn update_water_mesh(
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, currents);
     mesh.insert_indices(Indices::U32(indices));
 }
 
