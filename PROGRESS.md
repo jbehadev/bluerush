@@ -475,10 +475,32 @@ assets/shaders/water.wgsl — custom water material
   an import-line conflict in `flood.rs` by keeping both sides.
 - **README** — rewritten gameplay / structure / tech-stack sections for the heightfield game.
 
+### Session 24 (Sim unit tests — safety net for the upgrade)
+
+- **Extracted pure helpers** from Bevy systems in `flood.rs` so tests can call them without an `App`:
+  `flow_iteration(depth, floor, w, d, flow)` (one flow pass on any grid size; `step_flow` is now a
+  thin wrapper), `is_floating(depth, weight)` (shared by `object_physics` *and* `build_obstacles`,
+  which had diverging copies — identical for weights ≥ 60 kg), `mobility(weight)`, and
+  `separate_pair(pa, wa, pb, wb)` (mass-weighted push-apart from `object_collision`).
+- **13 new tests** (19 passing + 3 ignored generators): flow conserves water, never goes negative,
+  levels out on flat ground, runs downhill + current points downhill; weir dams below the crest,
+  spills only the overtopping layer, and crest water isn't dumped in one step; buoyancy (light
+  floats, heavy grounds, dry never floats, mobility capped at 1 and falls with weight); collision
+  (lighter shoved more, overlap fully removed, non-touching ignored).
+- **Testing the tests (mutation check)** — temporarily reverted the session-19 weir fix: every test
+  still passed, because the original dam tests never put water *on* the block. Added
+  `crest_water_is_not_dumped_in_one_step`, which fails on the old rule and passes on the fix.
+- **Concepts** — systems vs pure functions (Bevy `Res`/`ResMut` can't be faked cheaply; slices
+  can); `&mut [f32]` accepts both a `Vec` and a fixed array; `#[cfg(test)] mod tests` +
+  `use super::*` reaches private fns; small test helpers (`run_flow`, `total`); a test that never
+  failed may not test anything.
+
 ## Where We Left Off (current)
 
+**Session 24 (`test/sim-helpers`)** — sim helpers extracted + unit-tested (19 tests). Next up is
+the Bevy upgrade: 0.18 → 0.19 first.
+
 **Session 23 (`chore/cleanup`)** — dead files, old levels and unused deps removed; README current.
-Next up is unit tests for the sim helpers, then the Bevy 0.19 → 0.20 upgrade.
 
 **Session 22 (`feat/realistic-water`)** — water now renders with a custom shader: translucent,
 depth-tinted teal, flowing ripples, sky reflections from a physical atmosphere, sun shadows. Known
@@ -511,9 +533,9 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 - **Crest-edge polish (optional)** — the upstream overtopping sheet sticks out ~1 cell past the
   block back; needs finer geometry near obstacles if it ever bothers us.
 - ~~**Config + cleanup**~~ Done (session 23).
-- **Tests (next)** — extract pure sim helpers (flow, buoyancy, obstacle) and unit-test them; safety
-  net for the upgrade.
-- **Bevy upgrade** — 0.18 → 0.19 (build/test/run), then 0.19 → 0.20 (use 0.20.1+ if released).
+- ~~**Tests**~~ Done (session 24). Not yet covered: `build_obstacles` footprint mask, wall
+  collision — candidates if the upgrade touches them.
+- **Bevy upgrade (next)** — 0.18 → 0.19 (build/test/run), then 0.19 → 0.20 (use 0.20.1+ if released).
   Known 0.20 change: pointer events flattened (`Pointer<Press>` → `PointerPress`).
 - **Object destruction** — a strong enough current sweeps away or breaks objects.
 - ~~**Levels** — author terrain heightmaps; save/load.~~ Done (session 20): PNG heightmap +
