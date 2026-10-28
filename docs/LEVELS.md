@@ -25,7 +25,7 @@ Aseprite, …) and paint:
 - **Darker = lower.** Paint a dark line and water will find and follow it.
 - **Lighter = higher.** Paint bright borders to wall water in.
 - The image can be **any size** — it is smoothly resampled onto the game's
-  150×150 simulation grid at load. A 150×150 image is 1 pixel per cell;
+  300×300 simulation grid at load (`MAP_SCALE` × 150). A 300×300 image is 1 pixel per cell;
   bigger images just give you more comfortable brushwork.
 - 8-bit or 16-bit grayscale both work (the shipped templates are 16-bit for
   smooth slopes; 8-bit gives 256 height steps, which is usually fine).
@@ -53,7 +53,7 @@ height_scale: 160.0     # world height of a pure-white pixel (black = 0)
 source:                 # where water enters the map
   x: 0.59               # 0.0 = left edge … 1.0 = right edge
   z: 0.03               # 0.0 = back edge … 1.0 = front edge (the drain)
-  radius: 5             # source patch radius in cells (wider = gentler)
+  radius: 5             # source patch radius in cells at 150×150 (× MAP_SCALE in-game)
   rate: 110.0           # water depth added per second
 objects:                # starting blocks (optional)
   - { x: 0.71, z: 0.50, weight: 4000.0 }   # heavy — dams the stream

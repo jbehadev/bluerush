@@ -649,7 +649,23 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
   thresholds foamed every shore incl. the calm lake; raising `FOAM_SPEED` to 9–22 fixed it.
 - Tests: 54 (+4: perimeter, ring spacing, surround height, mesh shares edge heights).
 
+### Session 30 (FPS readout + maps twice as big)
+- **FPS readout** (`src/fps.rs`, new `FpsPlugin`) — `FrameTimeDiagnosticsPlugin` records frame
+  times into the `DiagnosticsStore` resource; a system reads
+  `.get(&FrameTimeDiagnosticsPlugin::FPS).and_then(|d| d.smoothed())` and rewrites a top-right
+  `Text` every 0.25 s (a `Local<f32>` timer — per-system state without a resource). Capped at
+  ~60 by the `WinitSettings` reactive 1/60 s update mode.
+- **Maps 2× bigger** — one knob, `MAP_SCALE` in `flood.rs`: grid 150² → 300² cells at the same
+  `CELL`, so the world is 2× wider/deeper (heights unchanged → slopes half as steep). Levels are
+  map fractions, so heightmaps/objects stretch for free; the yaml source `radius` (cells) is
+  multiplied by `MAP_SCALE` so the inflow keeps pace with the 4× channel area. Camera start
+  distance, max zoom and shadow cascades scale with it; the built-in valley's cell-unit
+  constants too. Lesson: storing positions as fractions made the resize a few-line change.
+
 ## Where We Left Off (current)
+
+**Session 30 (`feat/fps-bigger-maps`)** — FPS readout; maps 2× bigger via `MAP_SCALE`.
+Next: object destruction, or planar reflections.
 
 **Session 29 (`feat/scenery-surround`)** — surround land + mountains replace the grey band;
 shore foam on fast, thin water. Next: object destruction, or planar reflections.
