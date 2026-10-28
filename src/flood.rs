@@ -38,19 +38,23 @@ use crate::surround;
 // Tunables
 // ---------------------------------------------------------------------------
 
-// Grid resolution + cell size. The world span (≈ W·CELL) is kept ~constant when
-// changing these, so the camera framing stays put; only the detail changes.
-// NOTE: the channel-shape constants below (MEANDER_AMPL, CHANNEL_HW, BANK_K,
-// SOURCE_R) are in *cell* units, so they're scaled to CELL to keep the river the
-// same physical size — halving CELL means ~doubling those cell counts.
-pub(crate) const W: usize = 150;
-pub(crate) const D: usize = 150;
+// Grid resolution + cell size. The world span is ≈ W·CELL.
+// MAP_SCALE grows the map: the grid gets MAP_SCALE× more cells along each side
+// at the same CELL size, so the world is MAP_SCALE× wider and deeper (heights
+// are unchanged). Levels are stored as map fractions, so they stretch to fit;
+// anything a level gives in *cells* (the source radius) is multiplied by it.
+// The channel-shape constants below (MEANDER_AMPL, CHANNEL_HW, BANK_K) are in
+// cell units too, and are scaled with it so the built-in valley keeps its shape.
+pub(crate) const MAP_SCALE: usize = 2;
+pub(crate) const W: usize = 150 * MAP_SCALE;
+pub(crate) const D: usize = 150 * MAP_SCALE;
 pub(crate) const CELL: f32 = 4.0;
+const MS: f32 = MAP_SCALE as f32;
 const SLOPE_HEIGHT: f32 = 45.0; // stream bed drops this much from back (z=0) to front
-const MEANDER_AMPL: f32 = 32.0; // how far (cells) the stream snakes left/right
+const MEANDER_AMPL: f32 = 32.0 * MS; // how far (cells) the stream snakes left/right
 const MEANDER_FREQ: f32 = 2.0 * std::f32::consts::PI * 2.5 / D as f32; // ~2.5 S-curves down the length
-const CHANNEL_HW: f32 = 10.5; // half-width (cells) of the low stream bed
-const BANK_K: f32 = 0.018; // how steeply the banks rise beyond the channel (∝ 1/CELL²)
+const CHANNEL_HW: f32 = 10.5 * MS; // half-width (cells) of the low stream bed
+const BANK_K: f32 = 0.018 / (MS * MS); // how steeply the banks rise beyond the channel (∝ 1/CELL²)
 const BANK_MAX: f32 = 55.0; // cap on bank height
 const RIM_WIDTH: f32 = 4.0; // cells of raised containing wall along the left/right/back edges
 const RIM_HEIGHT: f32 = 60.0; // how tall that wall rises (world units) so water can't spill off the map
@@ -857,14 +861,14 @@ fn setup(
         // the water is at each pixel.
         DepthPrepass,
     ));
-    commands.insert_resource(OrbitCamera { focus: Vec3::ZERO, yaw: 0.0, pitch: 0.65, distance: 592.0 });
+    commands.insert_resource(OrbitCamera { focus: Vec3::ZERO, yaw: 0.0, pitch: 0.65, distance: 592.0 * MS });
     commands.spawn((
         DirectionalLight { illuminance: lux::RAW_SUNLIGHT, shadow_maps_enabled: true, ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.9, 0.5, 0.0)),
-        // Spread the shadow map over the whole ~600-unit map.
+        // Spread the shadow map over the whole map (~600 units × MAP_SCALE).
         CascadeShadowConfigBuilder {
-            first_cascade_far_bound: 300.0,
-            maximum_distance: 1500.0,
+            first_cascade_far_bound: 300.0 * MS,
+            maximum_distance: 1500.0 * MS,
             ..default()
         }
         .build(),
@@ -978,7 +982,7 @@ fn setup(
     let source = Source {
         x: (loaded.source.x * (W - 1) as f32).round().clamp(0.0, (W - 1) as f32) as usize,
         z: (loaded.source.z * (D - 1) as f32).round().clamp(0.0, (D - 1) as f32) as usize,
-        radius: loaded.source.radius,
+        radius: loaded.source.radius * MAP_SCALE as i32,
         rate: loaded.source.rate,
     };
 
@@ -1665,7 +1669,7 @@ fn switch_level(
     *source = Source {
         x: (loaded.source.x * (W - 1) as f32).round().clamp(0.0, (W - 1) as f32) as usize,
         z: (loaded.source.z * (D - 1) as f32).round().clamp(0.0, (D - 1) as f32) as usize,
-        radius: loaded.source.radius,
+        radius: loaded.source.radius * MAP_SCALE as i32,
         rate: loaded.source.rate,
     };
 
@@ -1811,7 +1815,7 @@ fn camera_controls(
     if scroll.delta.y != 0.0 {
         // Gentle zoom; clamp the per-event step so trackpads don't lurch.
         let z = (scroll.delta.y * 0.04).clamp(-0.25, 0.25);
-        orbit.distance = (orbit.distance * (1.0 - z)).clamp(120.0, 1400.0);
+        orbit.distance = (orbit.distance * (1.0 - z)).clamp(120.0, 1400.0 * MS);
     }
 
     let (cp, sp) = (orbit.pitch.cos(), orbit.pitch.sin());

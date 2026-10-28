@@ -7,6 +7,7 @@ use crate::config::AppConfig;
 
 mod config;
 mod flood;
+mod fps;
 mod level;
 mod rain;
 mod scenery;
@@ -31,5 +32,6 @@ fn main() {
         .add_plugins(flood::FloodPlugin { level: config.level.clone() })
         .add_plugins(scenery::SceneryPlugin)
         .add_plugins(rain::RainPlugin)
+        .add_plugins(fps::FpsPlugin)
         .run();
 }
