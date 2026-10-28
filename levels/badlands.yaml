@@ -1,0 +1,21 @@
+name: Badlands
+heightmap: badlands.png
+height_scale: 201.84663
+source:
+  x: 0.5852843
+  z: 0.20401338
+  radius: 5
+  rate: 130.0
+objects:
+- x: 0.3
+  z: 0.45
+  weight: 150.0
+- x: 0.62
+  z: 0.55
+  weight: 300.0
+- x: 0.45
+  z: 0.75
+  weight: 1000.0
+scenery:
+- trees
+- ruins

@@ -94,6 +94,8 @@ level's starting objects:
 | Highland Lake | `levels/highland-lake.yaml` | The source fills a deep basin behind a ridge; the only exit is a narrow spill notch. Watch the lake rise to the sill and pour down the runout — a 2000 kg block starts as a plug in the notch. |
 | Waterfall | `levels/waterfall.yaml` | A river crosses a high plateau and pours off a ~60-unit cliff into a plunge pool, then winds down a lower valley. Light blocks ride the river over the edge; a 2500 kg block dams the lower river. |
 | Cascades | `levels/cascades.yaml` | Four terraces, each ~25 units lower. The stream zig-zags across the map, dropping off a notch at alternating ends of each step into a small pool. A 2000 kg block sits on the third step. |
+| Badlands | `levels/badlands.yaml` | No channel at all — lumpy, domain-warped noise terrain full of hollows and saddles. The spring sits on the highest hill at the back; the water fills each hollow until it finds the lowest lip, then spills on. You can't tell where it'll go until it gets there. |
+| Town in Peril | `levels/town-in-peril.yaml` | A puzzle. A town sits in a low pocket on a shelf, and the gully from the spring runs straight into it — left alone, the town floods in about a minute and a half. Partway down, a side gully splits off to the drain behind a low saddle: dam the main gully just below the fork (a heavy block or two) and the water turns aside. |
 
 ## Making a new level
 
@@ -109,12 +111,13 @@ level's starting objects:
 
 The committed level files are baked from generator functions in
 `src/flood.rs` (`terrain_height` for the valley; the `generate_extra_levels` and
-`generate_cliff_levels` tests for the rest). To re-bake after changing them:
+`generate_cliff_levels` and `generate_rough_levels` tests for the rest). To re-bake after changing them:
 
 ```sh
 cargo test generate_valley_level -- --ignored
 cargo test generate_extra_levels -- --ignored
 cargo test generate_cliff_levels -- --ignored
+cargo test generate_rough_levels -- --ignored
 ```
 
 Hand-edits to the PNGs survive until you re-run these — the generators are
