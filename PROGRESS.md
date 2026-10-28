@@ -649,7 +649,18 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
   thresholds foamed every shore incl. the calm lake; raising `FOAM_SPEED` to 9–22 fixed it.
 - Tests: 54 (+4: perimeter, ring spacing, surround height, mesh shares edge heights).
 
-### Session 30 (Release builds missing water + ground; Linux release)
+### Session 30 (WASD camera pan)
+- **WASD pans the camera** (`camera_controls`) relative to the view: W = into the screen,
+  D = screen-right. Speed = `distance × 0.8 × delta_secs`, so it feels the same at any zoom
+  and frame rate; diagonals are normalized. Works while paused.
+- **Wave cycle moved W → Q** (W was taken by `handle_wave_buttons`).
+- **Refactor for testing:** the ground-plane math moved into `pan_axes(yaw)` (shared with
+  middle-drag pan), and the key reading into `wasd_axis(&ButtonInput<KeyCode>)`. Taking a plain
+  reference instead of `Res<...>` lets a test build a `ButtonInput`, `.press()` keys, and check
+  the result without a Bevy `App`.
+- Tests: 56 (+2: pan forward matches the camera's look direction; WASD axis combines keys).
+
+### Session 31 (Release builds missing water + ground; Linux release)
 
 - **Bug** — the GitHub release binary showed trees, blocks and clouds but no water or ground
   (seen on CachyOS/NVIDIA). `cargo run` was fine. Cause: `release.yml` ships only the bare

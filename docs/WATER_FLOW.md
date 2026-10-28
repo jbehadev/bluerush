@@ -64,7 +64,7 @@ Water enters at the top of the channel every frame. The **wave pattern** (a
 | **Random** | gusty — a new random multiplier every `RANDOM_INTERVAL` seconds |
 | **Off**    | no inflow — the source is shut off (a FLOOD! surge still pours) |
 
-Click a pattern in the panel, or press **W** to cycle Flood → Sine → Random → Off.
+Click a pattern in the panel, or press **Q** to cycle Flood → Sine → Random → Off.
 
 `add_water` deposits depth into a small patch and nudges the ripple field so the
 inflow looks alive. Base rate is `SOURCE_RATE`.
@@ -195,7 +195,7 @@ per-vertex colour lerps **light brown (low streambed) → green (high banks)** o
 | Left-click | apply the selected tool (place block of the chosen weight / pour water / erase) |
 | Left-drag (block tool) | build a static wall along the drag; thickness/height from the selected weight |
 | Right-drag | orbit camera (`camera_controls`) |
-| Middle-drag | pan camera |
+| Middle-drag / `WASD` | pan camera (WASD speed scales with zoom) |
 | Scroll | zoom |
 | `Space` | pause / resume the simulation |
 | `R` | drain all water |
