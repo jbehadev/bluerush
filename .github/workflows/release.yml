@@ -25,12 +25,20 @@ jobs:
             runner: windows-latest
             binary: BlueRush.exe
             artifact: BlueRush-windows
+          - os: Linux
+            runner: ubuntu-latest
+            binary: BlueRush
+            artifact: BlueRush-linux
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
@@ -53,7 +61,13 @@ jobs:
           SRC=target/release/${{ matrix.binary }}
           EXT="${{ matrix.binary == 'BlueRush.exe' && '.exe' || '' }}"
           DST="${{ matrix.artifact }}-${VERSION}${EXT}"
-          cp "$SRC" "$DST"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            # Tarball keeps the executable bit, which a bare download loses.
+            DST="$DST.tar.gz"
+            tar -czf "$DST" -C target/release ${{ matrix.binary }}
+          else
+            cp "$SRC" "$DST"
+          fi
           echo "ASSET=$DST" >> $GITHUB_ENV
 
       - name: Upload binary
