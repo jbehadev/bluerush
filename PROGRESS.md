@@ -649,6 +649,23 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
   thresholds foamed every shore incl. the calm lake; raising `FOAM_SPEED` to 9–22 fixed it.
 - Tests: 54 (+4: perimeter, ring spacing, surround height, mesh shares edge heights).
 
+### Session 30 (Release builds missing water + ground; Linux release)
+
+- **Bug** — the GitHub release binary showed trees, blocks and clouds but no water or ground
+  (seen on CachyOS/NVIDIA). `cargo run` was fine. Cause: `release.yml` ships only the bare
+  binary, but the water/terrain shaders were runtime assets in `assets/shaders/`. Bevy skips
+  meshes whose material shader can't load, so only the built-in `StandardMaterial` things drew.
+- **Fix — embedded assets** — shaders moved to `src/shaders/` and registered in
+  `FloodPlugin::build` with `embedded_asset!(app, "shaders/water.wesl")` (imported from
+  `bevy::asset::embedded_asset` — not in the prelude). `include_bytes!` bakes them into the
+  binary; materials load `embedded://BlueRush/shaders/<file>`. The `assets/` folder is gone, so
+  the binary runs from any directory.
+- **Linux in CI** — `build.yml` and `release.yml` gained an `ubuntu-latest` job (installs
+  `libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev`). The Linux release ships as a
+  `.tar.gz` so the executable bit survives the download.
+- **Concepts** — runtime assets vs embedded assets; `embedded://` asset source and how its path
+  is built (crate name + path past `src/`); why a missing shader fails silently per material.
+
 ## Where We Left Off (current)
 
 **Session 29 (`feat/scenery-surround`)** — surround land + mountains replace the grey band;

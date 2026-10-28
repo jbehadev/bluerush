@@ -152,7 +152,7 @@ A single deforming mesh (`W × D` vertices) is rebuilt each frame:
 - Each vertex's `UV_0` carries the local **current** (`flow * FLOW_TO_SPEED`,
   world units/sec) instead of texture coordinates, for the shader below.
 - The material is `WaterMaterial` = `ExtendedMaterial<StandardMaterial, WaterExt>`
-  with the custom fragment shader **`assets/shaders/water.wesl`**. Bevy does the
+  with the custom fragment shader **`src/shaders/water.wesl`**. Bevy does the
   lighting; the shader adjusts its inputs per pixel:
   - **Depth colour** — the camera's `DepthPrepass` gives the terrain depth behind
     each water pixel; the gap is the water thickness along the view ray, and
