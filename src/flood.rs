@@ -24,6 +24,7 @@ use bevy::pbr::{AtmosphereSettings, ExtendedMaterial, MaterialExtension};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::asset::embedded_asset;
 use bevy::shader::ShaderRef;
 use bevy::ui::Pressed;
 use bevy::ui_widgets::Button;
@@ -101,7 +102,7 @@ const RIPPLE_DAMP: f32 = 0.96;
 const MAX_RIPPLE: f32 = 4.0;
 const RIPPLE_FADE: f32 = 5.0; // ripples fade out in water shallower than this
 
-// Water look (see assets/shaders/water.wesl).
+// Water look (see src/shaders/water.wesl).
 const WATER_ABSORPTION: f32 = 0.10; // murkiness per world unit of water the view ray crosses
 const SHORE_FADE: f32 = 1.5; // water this thin (world units) fades into the terrain
 const RIPPLE_STRENGTH: f32 = 0.12; // how far ripples tilt the surface normal
@@ -112,7 +113,7 @@ const FOAM_WIDTH: f32 = 4.0; // water thinner than this (world units) can foam
 const FOAM_SPEED: (f32, f32) = (9.0, 22.0); // current (world units/sec): no foam → full foam
 const FOAM_SIZE: f32 = 3.0; // world units per foam-noise cell (size of the clumps)
 
-// Ground cover (see assets/shaders/terrain.wesl).
+// Ground cover (see src/shaders/terrain.wesl).
 pub(crate) const GROUND_SAND_LINE: f32 = 0.18; // fraction of the height range below which ground is sand
 const GROUND_ROCK_SLOPE: f32 = 0.6; // normal.y below this (≈ 53° and steeper) is bare rock
 const GROUND_GRAIN: f32 = 0.10; // strength of the fine light/dark surface grain
@@ -308,7 +309,7 @@ struct WaterSettings {
 
 impl MaterialExtension for WaterExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/water.wesl".into()
+        "embedded://BlueRush/shaders/water.wesl".into()
     }
 }
 
@@ -336,7 +337,7 @@ struct TerrainSettings {
 
 impl MaterialExtension for TerrainExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/terrain.wesl".into()
+        "embedded://BlueRush/shaders/terrain.wesl".into()
     }
 }
 
@@ -768,6 +769,11 @@ pub struct FloodPlugin {
 
 impl Plugin for FloodPlugin {
     fn build(&self, app: &mut App) {
+        // Bake the shaders into the binary (served as `embedded://BlueRush/shaders/..`)
+        // so a release build runs without an `assets/` folder beside it.
+        embedded_asset!(app, "shaders/water.wesl");
+        embedded_asset!(app, "shaders/terrain.wesl");
+
         app.insert_resource(LevelPath(self.level.clone()))
             .insert_resource(ClearColor(Color::srgb(0.45, 0.62, 0.78)))
             .add_plugins(MaterialPlugin::<WaterMaterial>::default())
@@ -1544,7 +1550,7 @@ fn handle_wave_buttons(
     for b in &q {
         wave.pattern = b.0;
     }
-    if keys.just_pressed(KeyCode::KeyW) {
+    if keys.just_pressed(KeyCode::KeyQ) {
         wave.pattern = wave.pattern.next();
     }
 }
@@ -1756,10 +1762,29 @@ fn camera_modifier_held(keys: &ButtonInput<KeyCode>) -> bool {
     keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight, KeyCode::ShiftLeft, KeyCode::ShiftRight])
 }
 
+/// Ground-plane directions for a camera at `yaw`: (screen-right, screen-forward).
+/// Both are flat (y = 0) unit vectors, so panning never changes height.
+fn pan_axes(yaw: f32) -> (Vec3, Vec3) {
+    let right = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
+    let fwd = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+    (right, fwd)
+}
+
+/// WASD as a (right, forward) input axis, each in -1..=1.
+fn wasd_axis(keys: &ButtonInput<KeyCode>) -> Vec2 {
+    let mut v = Vec2::ZERO;
+    if keys.pressed(KeyCode::KeyD) { v.x += 1.0; }
+    if keys.pressed(KeyCode::KeyA) { v.x -= 1.0; }
+    if keys.pressed(KeyCode::KeyW) { v.y += 1.0; }
+    if keys.pressed(KeyCode::KeyS) { v.y -= 1.0; }
+    v
+}
+
 /// Orbit / pan / zoom the camera. Right-drag or Option+left-drag orbits;
-/// middle-drag or Shift+left-drag pans across the ground; the scroll wheel
-/// zooms. Plain left-drag is reserved for placing/pouring.
+/// middle-drag, Shift+left-drag or WASD pans across the ground; the scroll
+/// wheel zooms. Plain left-drag is reserved for placing/pouring.
 fn camera_controls(
+    time: Res<Time>,
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
@@ -1775,11 +1800,17 @@ fn camera_controls(
         orbit.yaw -= d.x * 0.005;
         orbit.pitch = (orbit.pitch - d.y * 0.005).clamp(0.15, 1.5);
     }
+    let (right, fwd) = pan_axes(orbit.yaw);
     if buttons.pressed(MouseButton::Middle) || (left && shift && !alt) {
         let pan = orbit.distance * 0.0015;
-        let right = Vec3::new(orbit.yaw.cos(), 0.0, -orbit.yaw.sin());
-        let fwd = Vec3::new(-orbit.yaw.sin(), 0.0, -orbit.yaw.cos());
         orbit.focus += right * (-d.x * pan) + fwd * (-d.y * pan);
+    }
+    // WASD pans at a speed proportional to zoom, so it feels the same close up
+    // and far out (~0.8 screen-heights per second).
+    let axis = wasd_axis(&keys);
+    if axis != Vec2::ZERO {
+        let speed = orbit.distance * 0.8 * time.delta_secs();
+        orbit.focus += (right * axis.x + fwd * axis.y).normalize() * speed;
     }
     if scroll.delta.y != 0.0 {
         // Gentle zoom; clamp the per-event step so trackpads don't lurch.
@@ -2284,6 +2315,29 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    #[test]
+    fn pan_forward_matches_camera_view() {
+        for yaw in [0.0, 0.7, PI / 2.0, -2.3] {
+            let (right, fwd) = pan_axes(yaw);
+            // The camera sits at +(sin, cos) from the focus, so it looks along -(sin, cos).
+            let look = -Vec3::new(f32::sin(yaw), 0.0, f32::cos(yaw));
+            assert!(fwd.distance(look) < 1e-5, "yaw {yaw}: fwd {fwd} != look {look}");
+            assert!(right.distance(fwd.cross(Vec3::Y)) < 1e-5, "yaw {yaw}: right not screen-right");
+            assert_eq!(right.y, 0.0);
+        }
+    }
+
+    #[test]
+    fn wasd_axis_combines_keys() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        assert_eq!(wasd_axis(&keys), Vec2::ZERO);
+        keys.press(KeyCode::KeyW);
+        keys.press(KeyCode::KeyD);
+        assert_eq!(wasd_axis(&keys), Vec2::new(1.0, 1.0));
+        keys.press(KeyCode::KeyS); // W + S cancel out
+        assert_eq!(wasd_axis(&keys), Vec2::new(1.0, 0.0));
+    }
 
     #[test]
     fn wave_cycle_visits_every_pattern_including_off() {

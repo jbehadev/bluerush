@@ -45,8 +45,8 @@ src/
   config.rs — AppConfig loaded from config.yaml (window size, level path)
   flood.rs  — FloodPlugin: terrain, water sim, objects, walls, UI, camera, input
   level.rs  — Level yaml + PNG heightmap loading
+  shaders/  — water.wesl, terrain.wesl (embedded into the binary)
 levels/     — Shipped levels (*.yaml + *.png heightmaps)
-assets/     — shaders/water.wesl (custom water material)
 docs/       — WATER_FLOW.md (how the sim works), LEVELS.md (level format)
 ```
 

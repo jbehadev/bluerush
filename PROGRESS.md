@@ -661,11 +661,35 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
   multiplied by `MAP_SCALE` so the inflow keeps pace with the 4× channel area. Camera start
   distance, max zoom and shadow cascades scale with it; the built-in valley's cell-unit
   constants too. Lesson: storing positions as fractions made the resize a few-line change.
+### Session 31 (WASD camera pan)
+- **WASD pans the camera** (`camera_controls`) relative to the view: W = into the screen,
+  D = screen-right. Speed = `distance × 0.8 × delta_secs`, so it feels the same at any zoom
+  and frame rate; diagonals are normalized. Works while paused.
+- **Wave cycle moved W → Q** (W was taken by `handle_wave_buttons`).
+- **Refactor for testing:** the ground-plane math moved into `pan_axes(yaw)` (shared with
+  middle-drag pan), and the key reading into `wasd_axis(&ButtonInput<KeyCode>)`. Taking a plain
+  reference instead of `Res<...>` lets a test build a `ButtonInput`, `.press()` keys, and check
+  the result without a Bevy `App`.
+- Tests: 56 (+2: pan forward matches the camera's look direction; WASD axis combines keys).
+
+### Session 32 (Release builds missing water + ground; Linux release)
+
+- **Bug** — the GitHub release binary showed trees, blocks and clouds but no water or ground
+  (seen on CachyOS/NVIDIA). `cargo run` was fine. Cause: `release.yml` ships only the bare
+  binary, but the water/terrain shaders were runtime assets in `assets/shaders/`. Bevy skips
+  meshes whose material shader can't load, so only the built-in `StandardMaterial` things drew.
+- **Fix — embedded assets** — shaders moved to `src/shaders/` and registered in
+  `FloodPlugin::build` with `embedded_asset!(app, "shaders/water.wesl")` (imported from
+  `bevy::asset::embedded_asset` — not in the prelude). `include_bytes!` bakes them into the
+  binary; materials load `embedded://BlueRush/shaders/<file>`. The `assets/` folder is gone, so
+  the binary runs from any directory.
+- **Linux in CI** — `build.yml` and `release.yml` gained an `ubuntu-latest` job (installs
+  `libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev`). The Linux release ships as a
+  `.tar.gz` so the executable bit survives the download.
+- **Concepts** — runtime assets vs embedded assets; `embedded://` asset source and how its path
+  is built (crate name + path past `src/`); why a missing shader fails silently per material.
 
 ## Where We Left Off (current)
-
-**Session 30 (`feat/fps-bigger-maps`)** — FPS readout; maps 2× bigger via `MAP_SCALE`.
-Next: object destruction, or planar reflections.
 
 **Session 29 (`feat/scenery-surround`)** — surround land + mountains replace the grey band;
 shore foam on fast, thin water. Next: object destruction, or planar reflections.
