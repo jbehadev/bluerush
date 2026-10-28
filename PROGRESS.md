@@ -660,10 +660,24 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
   the result without a Bevy `App`.
 - Tests: 56 (+2: pan forward matches the camera's look direction; WASD axis combines keys).
 
-## Where We Left Off (current)
+### Session 31 (Release builds missing water + ground; Linux release)
 
-**Session 30 (`feat/wasd-pan`)** — WASD camera pan; wave cycle is now Q. Next: object
-destruction, or planar reflections.
+- **Bug** — the GitHub release binary showed trees, blocks and clouds but no water or ground
+  (seen on CachyOS/NVIDIA). `cargo run` was fine. Cause: `release.yml` ships only the bare
+  binary, but the water/terrain shaders were runtime assets in `assets/shaders/`. Bevy skips
+  meshes whose material shader can't load, so only the built-in `StandardMaterial` things drew.
+- **Fix — embedded assets** — shaders moved to `src/shaders/` and registered in
+  `FloodPlugin::build` with `embedded_asset!(app, "shaders/water.wesl")` (imported from
+  `bevy::asset::embedded_asset` — not in the prelude). `include_bytes!` bakes them into the
+  binary; materials load `embedded://BlueRush/shaders/<file>`. The `assets/` folder is gone, so
+  the binary runs from any directory.
+- **Linux in CI** — `build.yml` and `release.yml` gained an `ubuntu-latest` job (installs
+  `libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev`). The Linux release ships as a
+  `.tar.gz` so the executable bit survives the download.
+- **Concepts** — runtime assets vs embedded assets; `embedded://` asset source and how its path
+  is built (crate name + path past `src/`); why a missing shader fails silently per material.
+
+## Where We Left Off (current)
 
 **Session 29 (`feat/scenery-surround`)** — surround land + mountains replace the grey band;
 shore foam on fast, thin water. Next: object destruction, or planar reflections.

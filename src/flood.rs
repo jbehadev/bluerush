@@ -24,6 +24,7 @@ use bevy::pbr::{AtmosphereSettings, ExtendedMaterial, MaterialExtension};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::asset::embedded_asset;
 use bevy::shader::ShaderRef;
 use bevy::ui::Pressed;
 use bevy::ui_widgets::Button;
@@ -97,7 +98,7 @@ const RIPPLE_DAMP: f32 = 0.96;
 const MAX_RIPPLE: f32 = 4.0;
 const RIPPLE_FADE: f32 = 5.0; // ripples fade out in water shallower than this
 
-// Water look (see assets/shaders/water.wesl).
+// Water look (see src/shaders/water.wesl).
 const WATER_ABSORPTION: f32 = 0.10; // murkiness per world unit of water the view ray crosses
 const SHORE_FADE: f32 = 1.5; // water this thin (world units) fades into the terrain
 const RIPPLE_STRENGTH: f32 = 0.12; // how far ripples tilt the surface normal
@@ -108,7 +109,7 @@ const FOAM_WIDTH: f32 = 4.0; // water thinner than this (world units) can foam
 const FOAM_SPEED: (f32, f32) = (9.0, 22.0); // current (world units/sec): no foam → full foam
 const FOAM_SIZE: f32 = 3.0; // world units per foam-noise cell (size of the clumps)
 
-// Ground cover (see assets/shaders/terrain.wesl).
+// Ground cover (see src/shaders/terrain.wesl).
 pub(crate) const GROUND_SAND_LINE: f32 = 0.18; // fraction of the height range below which ground is sand
 const GROUND_ROCK_SLOPE: f32 = 0.6; // normal.y below this (≈ 53° and steeper) is bare rock
 const GROUND_GRAIN: f32 = 0.10; // strength of the fine light/dark surface grain
@@ -304,7 +305,7 @@ struct WaterSettings {
 
 impl MaterialExtension for WaterExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/water.wesl".into()
+        "embedded://BlueRush/shaders/water.wesl".into()
     }
 }
 
@@ -332,7 +333,7 @@ struct TerrainSettings {
 
 impl MaterialExtension for TerrainExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/terrain.wesl".into()
+        "embedded://BlueRush/shaders/terrain.wesl".into()
     }
 }
 
@@ -764,6 +765,11 @@ pub struct FloodPlugin {
 
 impl Plugin for FloodPlugin {
     fn build(&self, app: &mut App) {
+        // Bake the shaders into the binary (served as `embedded://BlueRush/shaders/..`)
+        // so a release build runs without an `assets/` folder beside it.
+        embedded_asset!(app, "shaders/water.wesl");
+        embedded_asset!(app, "shaders/terrain.wesl");
+
         app.insert_resource(LevelPath(self.level.clone()))
             .insert_resource(ClearColor(Color::srgb(0.45, 0.62, 0.78)))
             .add_plugins(MaterialPlugin::<WaterMaterial>::default())
