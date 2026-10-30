@@ -611,7 +611,7 @@ fn water_load(cells: &[usize], ground: &[f32], depth: &[f32], current: impl Fn(u
 /// Health (1 = sound, 0 = broken) after `dt` seconds under `load`. Nothing
 /// happens at or below `strength`; above it the piece wears faster the more
 /// it's overloaded — twice its strength breaks it in BREAK_SECS.
-fn wear(health: f32, load: f32, strength: f32, dt: f32) -> f32 {
+pub(crate) fn wear(health: f32, load: f32, strength: f32, dt: f32) -> f32 {
     let overload = (load / strength - 1.0).max(0.0);
     (health - overload * dt / BREAK_SECS).max(0.0)
 }
@@ -632,7 +632,7 @@ fn tipped(rest: &Transform, pivot: Vec3, toward: Vec2, angle: f32) -> Transform 
 
 /// Grid cells (as indices) whose centres lie within `radius` world units of
 /// `center` (x/z) — where a piece feels the water.
-fn cells_near(center: Vec2, radius: f32) -> Vec<usize> {
+pub(crate) fn cells_near(center: Vec2, radius: f32) -> Vec<usize> {
     let (cx, cz) = cell_of(center);
     let r = (radius / CELL).ceil() as usize;
     let mut cells = Vec::new();

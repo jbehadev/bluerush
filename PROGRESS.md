@@ -716,6 +716,10 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
 
 ## Where We Left Off (current)
 
+**Session 34 (`feat/breakable-walls`)** — walls break: each piece wears when water stands past ¾
+of its height or pours over its top, then washes away as a light block. Next: object (block)
+destruction, or polish (debris/splash on breach, damage tint).
+
 **Session 33 (`feat/bumpy-map`)** — Badlands (lumpy noise terrain, unpredictable water) and Town
 in Peril (dam the gully to save the town). Next: a win/lose check for the town (count surviving
 buildings), or ship `levels/` with releases (release.yml packages only the binary today).
@@ -765,19 +769,50 @@ surge still works) as a fourth WAVE panel button, plus the `W` key cycling Flood
 Learned: adding an enum variant makes the compiler flag every non-exhaustive `match`; small
 `impl` methods on enums (`next()`) keep cycle logic testable.
 
+### Session 33 (Breakable walls)
+- **Walls break** — each wall is still one `Wall` (used by erase and the drag preview), but its
+  short cubes are now `WallPiece` children that dam, collide and wear on their own, so the
+  water breaches the wall where it presses hardest instead of toppling the whole thing.
+- **Two ways a piece gives way** (`wear_walls`, runs after `build_obstacles`):
+  - **Head** — `wall_head`: how high the water stands up the wall, measured from the ground
+    under the piece, beyond the water on the far side. Past `WALL_STRENGTH` (¾) of the piece's
+    height it wears (`scenery::wear`).
+  - **Overtopping** — `wall_overtopped`: water deeper than `WALL_WET` racing over the top faster
+    than `WALL_SCOUR_SPEED` scours it as if water stood its full height, even when the far side
+    has flooded too (how real levees fail).
+- **Eroding** — `WallPiece::dam()` shrinks with health (down to `WALL_ERODE` of its height):
+  the cube gets shorter, dams lower and gets weaker, so a failing piece keeps failing. At zero
+  it's despawned and a `WALL_CHUNK` (30%) weight block is left for the current to carry off.
+- **Heavier walls are taller** — `wall_height` is up to `WALL_EXTRA_HEIGHT` (30%) taller than a
+  block of the same weight, so they hold back more water.
+- **Tuning by playtest — lessons:**
+  - Scenery's `water_load` counted drag from the current in *any* direction; water diverted
+    *along* a wall wore it down, so walls felt weak however strong they were. Walls use head only.
+  - `water_load` caps the head at the deepest water. On a slope the ground behind a wall is
+    higher than under it, so the water's depth undercounts how high it stands up the wall —
+    walls on the highland never broke. Hence `wall_head` measures from the wall's own ground.
+  - Water flooding both sides leaves almost no head even while it pours over the top → the
+    overtopping rule.
+- **Rust** — small methods on a component (`dam()`); `pub(crate)` to share helpers across
+  modules (`cells_near`, `wear`); `try_despawn` when another system may already have removed it.
+- Tests: 61 (+5: erosion lowers the dam, heavy walls are taller, ¾ threshold + calm lake,
+  head on a slope, overtopping needs fast water on the top).
+
 ## What Comes Next
+- ~~**Breakable walls**~~ Done (session 33). Possible polish: splash/debris when a piece goes,
+  darker tint as health drops, R repairs walls.
 - **Town in Peril win/lose (next)** — count surviving town buildings; "Town saved!" if most
   stand after N minutes of storm, "Town lost" otherwise. More puzzle levels on the same idea.
 - **Ship levels with releases** — `release.yml` packages only the binary, so releases fall back
   to the built-in valley; embed the level files or package `levels/`.
 - ~~**Scenery destruction**~~ Done (session 28). Possible polish: splash/dust puffs on collapse,
   damage tint/cracks, debris colliding with blocks/walls, debris jams that dam.
-- **Object destruction (next)** — reuse `water_load` + `wear` for player blocks/walls: a strong
-  enough current sweeps away or breaks them.
+- **Object destruction (next)** — reuse `water_load` + `wear` for player blocks: a strong
+  enough current sweeps away or breaks them. (Walls done, session 33.)
 - **Scenery realism** — ~~textured terrain~~ (27), ~~grey band → surround land~~ and
   ~~shore foam~~ (29) done. Remaining (optional): planar reflections of banks/blocks (second
   camera render); sparse trees on the near surround; snow/rock on the far mountains.
-- **Walls (optional)** — weight-based walls that can be undermined/washed away; curved/polyline walls.
+- **Walls (optional)** — curved/polyline walls. (Breaking done, session 33.)
 - **Crest-edge polish (optional)** — the upstream overtopping sheet sticks out ~1 cell past the
   block back; needs finer geometry near obstacles if it ever bothers us.
 - ~~**Config + cleanup**~~ Done (session 23).
