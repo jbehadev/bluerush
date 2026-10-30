@@ -5,7 +5,7 @@ A flood simulation game built with Rust and the [Bevy](https://bevyengine.org/) 
 ## Gameplay
 
 - **Place blocks** of varying weight — light ones get carried by the current, heavy ones dam and divert it
-- **Draw walls** by click-and-drag to channel the flow
+- **Draw walls** by click-and-drag to channel the flow — but pile the water too high, or let it pour over, and they break
 - **Pour water** anywhere, or trigger a FLOOD! surge
 - **Pick a wave pattern** for the source (Flood, Sine, Random, Off)
 - **Load levels** from `levels/*.yaml` + PNG heightmaps (see [docs/LEVELS.md](docs/LEVELS.md))

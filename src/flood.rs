@@ -31,7 +31,7 @@ use bevy::ui_widgets::Button;
 use std::collections::HashMap;
 
 use crate::level::{self, LoadedLevel, ObjectConfig, SourceConfig};
-use crate::scenery::{self, ActiveScenery, SceneryKind};
+use crate::scenery::{self, cells_near, wear, ActiveScenery, SceneryKind};
 use crate::surround;
 
 // ---------------------------------------------------------------------------
@@ -75,6 +75,15 @@ const VERT_EASE: f32 = 0.15; // how fast an object eases toward its target heigh
 pub(crate) const FLOW_TO_SPEED: f32 = 80.0; // converts the local current into a drift speed
 const FLOW_EASE: f32 = 0.12; // how fast an object's velocity matches the current
 const REF_WEIGHT: f32 = 150.0; // a "light" object; mobility = REF_WEIGHT / weight (capped at 1)
+
+// Walls give way. Each piece of a wall feels the water piled up against it
+// (`wall_head`) and wears while that beats its strength.
+const WALL_STRENGTH: f32 = 0.75; // water a piece holds back, as a share of its current height
+const WALL_WET: f32 = 0.5; // water shallower than this (a thin sheet running downhill) doesn't press on a wall
+const WALL_SCOUR_SPEED: f32 = 5.0; // water running over a wall's top faster than this (world units/sec) scours it
+const WALL_ERODE: f32 = 0.5; // share of its height a piece wears away before it breaches
+const WALL_CHUNK: f32 = 0.3; // a breached piece washes off as a block this share of the wall's weight
+const WALL_EXTRA_HEIGHT: f32 = 0.3; // the heaviest wall stands this much taller than its block (lightest: same)
 
 // UI / controls.
 const PANEL_WIDTH: f32 = 120.0; // left toolbar width (world clicks under it are ignored)
@@ -354,12 +363,33 @@ struct FloatObject {
 /// A player-drawn wall: a straight, static barrier from `a` to `b` (world x, z).
 /// Its thickness and height come from the weight selected when it was drawn.
 /// Unlike blocks, walls never float or move — they're levees for steering water.
-/// The rendered cubes are child entities, so despawning the wall removes them too.
+/// The rendered cubes are child `WallPiece`s, so despawning the wall removes them too.
 #[derive(Component)]
 struct Wall {
     a: Vec2,
     b: Vec2,
     weight: f32,
+}
+
+/// One short run of a wall, from `a` to `b`. Pieces dam and collide on their
+/// own, so when the water wears one through it leaves a breach in the wall.
+#[derive(Component)]
+struct WallPiece {
+    a: Vec2,
+    b: Vec2,
+    weight: f32,
+    health: f32,       // 1 = sound, 0 = breached
+    cells: Vec<usize>, // where it feels the water: its footprint and a ring around it
+    base: f32,         // world y of the cube's bottom
+    ground: f32,       // terrain height at its middle: water against it is measured from here
+    top: f32,          // world y of the undamaged cube's top
+}
+
+impl WallPiece {
+    /// How high it dams above the ground right now: it wears down as it's damaged.
+    fn dam(&self) -> f32 {
+        wall_height(self.weight) * (1.0 - WALL_ERODE * (1.0 - self.health))
+    }
 }
 
 /// An in-progress left-button drag with the block tool. `start` is where the
@@ -569,6 +599,12 @@ fn obj_height(weight: f32) -> f32 {
     OBJ_HEIGHT_MIN + weight_t(weight) * (OBJ_HEIGHT_MAX - OBJ_HEIGHT_MIN)
 }
 
+/// A wall's height (world units): heavier walls stand taller than a block of
+/// the same weight, so they hold back more water.
+fn wall_height(weight: f32) -> f32 {
+    obj_height(weight) * (1.0 + WALL_EXTRA_HEIGHT * weight_t(weight))
+}
+
 /// Can water this deep hold up an object this heavy? Too-shallow water (≤ WET)
 /// never floats anything. Grounded objects rest on the terrain and dam the flow.
 fn is_floating(depth: f32, weight: f32) -> bool {
@@ -722,7 +758,7 @@ fn spawn_wall(
     let len = a.distance(b);
     let dir = (b - a) / len.max(1e-6);
     let thick = obj_footprint(weight);
-    let h = obj_height(weight);
+    let h = wall_height(weight);
     let rot = Quat::from_rotation_y(-dir.y.atan2(dir.x)); // local +X → along the wall
     let n = (len / (CELL * 2.0)).ceil().max(1.0) as usize;
     let seg = len / n as f32;
@@ -741,7 +777,9 @@ fn spawn_wall(
                 let (g0, g1, gm) = (ground(s0), ground(s1), ground(mid));
                 let base = g0.min(g1).min(gm) - 1.0;
                 let top = g0.max(g1).max(gm) + h;
+                let reach = seg.max(thick) * 0.5 + CELL * 1.5;
                 parent.spawn((
+                    WallPiece { a: s0, b: s1, weight, health: 1.0, cells: cells_near(mid, reach), base, ground: gm, top },
                     Mesh3d(cube.clone()),
                     MeshMaterial3d(material.clone()),
                     Transform {
@@ -818,6 +856,7 @@ impl Plugin for FloodPlugin {
                     run_source,
                     handle_click,
                     build_obstacles,
+                    wear_walls,
                     step_flow,
                     step_ripples,
                     object_physics,
@@ -1012,7 +1051,7 @@ fn build_obstacles(
     terrain: Res<Terrain>,
     water: Res<Water>,
     objs: Query<&FloatObject>,
-    walls: Query<&Wall>,
+    pieces: Query<&WallPiece>,
     blockers: Query<&Blocker>,
     mut obstacle: ResMut<Obstacle>,
 ) {
@@ -1028,9 +1067,9 @@ fn build_obstacles(
     // Walls always dam: raise every cell whose centre lies inside the wall's
     // rectangle (within half the thickness of the a–b line, between the ends).
     let off = half();
-    for wall in &walls {
+    for wall in &pieces {
         let hw = obj_footprint(wall.weight) * 0.5;
-        let dam = obj_height(wall.weight);
+        let dam = wall.dam();
         let (lo, hi) = (wall.a.min(wall.b) - Vec2::splat(hw), wall.a.max(wall.b) + Vec2::splat(hw));
         let (x0, z0) = cell_of(lo);
         let (x1, z1) = cell_of(hi);
@@ -1082,11 +1121,84 @@ fn build_obstacles(
     }
 }
 
+/// How high (world units) water stands up a wall whose ground is at `ground`,
+/// beyond the water on its other side. Looks over `cells` around the wall:
+/// the highest water surface there is the high side; the lowest surface (or the
+/// wall's own ground, if that's higher) is the low side. `floor` includes the
+/// walls themselves, so water level over the crest on both sides gives 0.
+fn wall_head(cells: &[usize], floor: &[f32], depth: &[f32], ground: f32) -> f32 {
+    let (mut high, mut low) = (f32::NEG_INFINITY, f32::INFINITY);
+    for &c in cells {
+        let surface = floor[c] + depth[c];
+        if depth[c] > WALL_WET {
+            high = high.max(surface);
+        }
+        low = low.min(surface);
+    }
+    (high - low.max(ground)).max(0.0) // no water at all: high is -∞ → 0
+}
+
+/// Is water pouring over the top of a wall? True if any cell in `cells` that's
+/// under something (`obstacle` > 0 — the wall itself) has water deeper than
+/// WALL_WET on it running faster than WALL_SCOUR_SPEED. Still water lying over
+/// a wall (a calm lake) doesn't count.
+fn wall_overtopped(cells: &[usize], obstacle: &[f32], depth: &[f32], speed: impl Fn(usize) -> f32) -> bool {
+    cells.iter().any(|&c| obstacle[c] > 0.0 && depth[c] > WALL_WET && speed(c) > WALL_SCOUR_SPEED)
+}
+
+/// Let the water push on every wall piece. A piece holds until the water piled
+/// up on one side stands WALL_STRENGTH of its height above the other side; past
+/// that it wears down (and dams lower); at zero health it breaches: the
+/// piece is gone and a lighter block of it is left for the current to sweep off.
+fn wear_walls(
+    mut commands: Commands,
+    paused: Res<Paused>,
+    terrain: Res<Terrain>,
+    water: Res<Water>,
+    obstacle: Res<Obstacle>,
+    assets: Res<ObjectAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut pieces: Query<(Entity, &mut WallPiece, &mut Transform)>,
+) {
+    if paused.0 || pieces.is_empty() {
+        return;
+    }
+    // The floor the water stands on, walls included: water level with a wall's
+    // crest on both sides pushes evenly, so a wall in a calm lake holds.
+    let floor: Vec<f32> = terrain.0.iter().zip(&obstacle.0).map(|(t, o)| t + o).collect();
+    for (entity, mut piece, mut tf) in &mut pieces {
+        // Only water piled up counts: water running along a wall doesn't wear it.
+        // Water pouring over the top does — it's piled higher than the crest.
+        let mut load = wall_head(&piece.cells, &floor, &water.depth, piece.ground);
+        // Water pouring over the top scours it as hard as water piled to its full
+        // height — even when the far side has flooded too and the head is small.
+        if wall_overtopped(&piece.cells, &obstacle.0, &water.depth, |c| water.current(c).length()) {
+            load = load.max(piece.dam());
+        }
+        // An eroded piece is weaker too, so once it starts going it keeps going.
+        let strength = WALL_STRENGTH * piece.dam();
+        if load <= strength {
+            continue; // holding
+        }
+        piece.health = wear(piece.health, load, strength, DT);
+        if piece.health > 0.0 {
+            let top = piece.top - (wall_height(piece.weight) - piece.dam());
+            tf.translation.y = (piece.base + top) * 0.5;
+            tf.scale.y = top - piece.base;
+            continue;
+        }
+        // Breached. `try_despawn`: a level switch this frame may already have removed it.
+        commands.entity(entity).try_despawn();
+        let chunk = (piece.weight * WALL_CHUNK).max(WEIGHTS[0]);
+        spawn_object(&mut commands, assets.cube.clone(), &mut materials, &terrain.0, (piece.a + piece.b) * 0.5, chunk);
+    }
+}
+
 /// Separate overlapping objects (mass-weighted): the lighter one gets shoved
 /// more, so a heavy block holds its ground and others pile against it.
 fn object_collision(
     paused: Res<Paused>,
-    walls: Query<&Wall>,
+    walls: Query<&WallPiece>,
     mut q: Query<(Entity, &mut FloatObject)>,
 ) {
     if paused.0 {
@@ -1856,7 +1968,7 @@ fn draw_placement_cursor(
             let b = Vec2::new(hit.x, hit.z);
             let dir = (b - a).normalize();
             let side = dir.perp() * obj_footprint(w) * 0.5;
-            let h = obj_height(w);
+            let h = wall_height(w);
             let col = Color::srgb(1.0, 0.95, 0.30);
             let ground = |p: Vec2| { let (gx, gz) = cell_of(p); terrain.0[idx(gx, gz)] };
             let corners = [a - side, b - side, b + side, a + side];
@@ -2368,6 +2480,80 @@ mod tests {
         assert!(r > source.radius);
         let total = |radius: i32, rate: f32| ((2 * radius + 1) as f32).powi(2) * rate;
         assert!((total(r, rate) - RAIN_RATE_SCALE * total(source.radius, source.rate)).abs() < 1e-2);
+    }
+
+    fn wall_piece(weight: f32, health: f32) -> WallPiece {
+        WallPiece { a: Vec2::ZERO, b: Vec2::X, weight, health, cells: vec![], base: 0.0, ground: 0.0, top: 0.0 }
+    }
+
+    #[test]
+    fn a_wall_piece_dams_lower_as_it_wears() {
+        let h = wall_height(1000.0);
+        assert_eq!(wall_piece(1000.0, 1.0).dam(), h, "a sound piece dams its full height");
+        assert_eq!(wall_piece(1000.0, 0.0).dam(), h * (1.0 - WALL_ERODE));
+        assert!(wall_piece(1000.0, 0.5).dam() < h);
+    }
+
+    #[test]
+    fn heavy_walls_stand_taller_than_their_blocks() {
+        assert_eq!(wall_height(200.0), obj_height(200.0), "the lightest wall is block height");
+        assert!(wall_height(5000.0) > obj_height(5000.0));
+    }
+
+    /// Water head on an `h`-high wall standing on flat ground at 0, with an
+    /// upstream and a downstream neighbour, each given as a water depth.
+    /// `up_ground` raises the upstream ground (a wall across a slope).
+    fn wall_load(up: f32, on: f32, down: f32, h: f32, up_ground: f32) -> f32 {
+        let cells = [idx(10, 10), idx(10, 11), idx(10, 12)];
+        let mut floor = vec![0.0; W * D];
+        let mut depth = vec![0.0; W * D];
+        floor[cells[0]] = up_ground;
+        floor[cells[1]] = h;
+        depth[cells[0]] = up;
+        depth[cells[1]] = on;
+        depth[cells[2]] = down;
+        wall_head(&cells, &floor, &depth, 0.0)
+    }
+
+    #[test]
+    fn a_wall_holds_in_a_calm_lake_but_not_with_water_piled_on_one_side() {
+        let h = wall_height(1000.0);
+        let strength = WALL_STRENGTH * h;
+        // Level water over the crest on both sides: no push at all.
+        assert_eq!(wall_load(h + 1.0, 1.0, h + 1.0, h, 0.0), 0.0);
+        // Water up to ¾ of the wall on one side: it holds.
+        assert!(wall_load(h * 0.74, 0.0, 0.0, h, 0.0) <= strength);
+        // Past ¾ of the way up, dry on the other side: it starts to give.
+        assert!(wall_load(h * 0.8, 0.0, 0.0, h, 0.0) > strength);
+        // Water on the other side takes some of the push off.
+        assert!(wall_load(h * 0.8, 0.0, h * 0.5, h, 0.0) <= strength);
+        // No water anywhere: nothing.
+        assert_eq!(wall_load(0.0, 0.0, 0.0, h, 0.0), 0.0);
+    }
+
+    #[test]
+    fn only_fast_water_over_the_top_scours_a_wall() {
+        let (on, beside) = (idx(10, 11), idx(10, 10));
+        let cells = [beside, on];
+        let mut obstacle = vec![0.0; W * D];
+        let mut depth = vec![0.0; W * D];
+        obstacle[on] = 10.0;
+        depth[on] = 2.0;
+        depth[beside] = 2.0;
+        let fast = WALL_SCOUR_SPEED + 1.0;
+        assert!(wall_overtopped(&cells, &obstacle, &depth, |_| fast), "water racing over the top");
+        assert!(!wall_overtopped(&cells, &obstacle, &depth, |_| 0.0), "a calm lake lying over it");
+        // Fast water only beside the wall, none on top: not overtopped.
+        depth[on] = 0.0;
+        assert!(!wall_overtopped(&cells, &obstacle, &depth, |_| fast));
+    }
+
+    #[test]
+    fn a_wall_across_a_slope_feels_the_full_height_of_the_water() {
+        // Upstream ground is half the wall's height up the slope, so the water
+        // there is only 0.3·h deep — but it stands 0.8·h up the wall.
+        let h = wall_height(1000.0);
+        assert!(wall_load(h * 0.3, 0.0, 0.0, h, h * 0.5) > WALL_STRENGTH * h);
     }
 
     #[test]

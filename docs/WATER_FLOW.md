@@ -132,6 +132,13 @@ frame: buildings up to their eaves, ruin walls to their tops. When a building
 crumbles its `Blocker` drops to a low rubble mound; a toppled wall loses it, and
 the water runs through. (The water's push that breaks them — `water_load`,
 drag + head — lives in `scenery.rs`; see `PROGRESS.md` session 28.)
+
+Player **walls break** too. Each wall is built of short `WallPiece`s that dam on
+their own. `wear_walls` wears a piece while the water stands more than
+`WALL_STRENGTH` (¾) of its height up it beyond the far side (`wall_head`), or
+while fast water pours over its top (`wall_overtopped`). A worn piece dams
+lower; at zero it's gone — a breach — and a light block washes off in its place.
+See `PROGRESS.md` session 33.
 >
 > *Known limitation:* overtopping currently shows as the water level rising
 > against the dam and spilling around/over — not a literal cresting sheet on top
@@ -193,7 +200,7 @@ per-vertex colour lerps **light brown (low streambed) → green (high banks)** o
 | Input | Action |
 |-------|--------|
 | Left-click | apply the selected tool (place block of the chosen weight / pour water / erase) |
-| Left-drag (block tool) | build a static wall along the drag; thickness/height from the selected weight |
+| Left-drag (block tool) | build a wall along the drag; thickness/height from the selected weight; the water can break it |
 | Right-drag | orbit camera (`camera_controls`) |
 | Middle-drag / `WASD` | pan camera (WASD speed scales with zoom) |
 | Scroll | zoom |
@@ -220,7 +227,8 @@ pour/erase (`draw_placement_cursor`).
 - `add_water` — deposit depth + kick ripples in a patch
 - `step_flow` — the relaxation flow + current field + edge drain
 - `step_ripples` — visual ripple wave equation
-- `build_obstacles` — damming floor from grounded blocks, walls and scenery `Blocker`s
+- `build_obstacles` — damming floor from grounded blocks, wall pieces and scenery `Blocker`s
+- `wear_walls` — wall pieces wear under water piled against them (`wall_head`) or pouring over (`wall_overtopped`), then breach
 - `update_water_mesh` — rebuild the clipped, lit water surface
 
 **Objects**
@@ -230,7 +238,7 @@ pour/erase (`draw_placement_cursor`).
 - `object_collision` — mass-weighted separation
 
 **Input / UI / camera**
-- `handle_click` — left-click tool dispatch (place / wall / pour / erase); `WallDrag` tracks the drag, `spawn_wall` builds the `Wall`
+- `handle_click` — left-click tool dispatch (place / wall / pour / erase); `WallDrag` tracks the drag, `spawn_wall` builds the `Wall` and its `WallPiece`s
 - `setup_ui`, `handle_weight_buttons`, `handle_pour_button`, `handle_erase_button`,
   `handle_wave_buttons`, `update_tool_highlight`, `update_wave_highlight`
 - `camera_controls` — orbit / pan / zoom (`OrbitCamera`)
