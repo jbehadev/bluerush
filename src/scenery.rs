@@ -1213,6 +1213,20 @@ mod tests {
         }
     }
 
+    /// Town in Peril only works if the town really is in the low pocket the
+    /// gully runs into: the shipped level's city must build on that terrace
+    /// (centred left/right, 70% of the way to the drain).
+    #[test]
+    fn town_in_peril_builds_its_town_in_the_pocket() {
+        let level = crate::level::load("levels/town-in-peril.yaml", W, D).unwrap();
+        let plan = plan_scenery(&level.heights, &dry(), &ActiveScenery(vec![SceneryKind::City]));
+        assert!(plan.buildings.len() >= TOWN_MIN_LOTS, "got {} buildings", plan.buildings.len());
+        let square = crate::flood::cell_to_world((W - 1) as f32 * 0.5, 0.70 * (D - 1) as f32);
+        for b in &plan.buildings {
+            assert!(b.pos.distance(square) < 40.0 * CELL, "building at {:?} is outside the pocket", b.pos);
+        }
+    }
+
     #[test]
     fn buildings_do_not_overlap() {
         let plan = plan_scenery(&valley(), &dry(), &all());

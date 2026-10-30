@@ -82,7 +82,7 @@ fn value_noise(p: Vec2) -> f32 {
 }
 
 /// A few octaves of value noise ("fractal"), roughly 0..1.
-fn fbm(p: Vec2) -> f32 {
+pub(crate) fn fbm(p: Vec2) -> f32 {
     let mut sum = 0.0;
     let mut amp = 0.5;
     let mut q = p;

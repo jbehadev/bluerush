@@ -2796,8 +2796,20 @@ mod tests {
         source: SourceConfig,
         objects: Vec<ObjectConfig>,
     ) {
+        bake_with(path, name, h, source, objects, vec![SceneryKind::Trees]);
+    }
+
+    /// `bake`, choosing the level's scenery sets.
+    fn bake_with(
+        path: &str,
+        name: &str,
+        h: &dyn Fn(usize, usize) -> f32,
+        source: SourceConfig,
+        objects: Vec<ObjectConfig>,
+        scenery: Vec<SceneryKind>,
+    ) {
         let heights = (0..W * D).map(|i| h(i % W, i / W)).collect();
-        let level = LoadedLevel { name: name.into(), heights, source, objects, scenery: vec![SceneryKind::Trees] };
+        let level = LoadedLevel { name: name.into(), heights, source, objects, scenery };
         level::write_template(path, &level, W, D).unwrap();
     }
 
@@ -3005,6 +3017,203 @@ mod tests {
                 ObjectConfig { x: fx(xs[3]), z: 0.69, weight: 2000.0 },
             ],
         );
+    }
+
+    /// Lumpy ground, roughly 0..1, at map fraction `p` (0..1 across the map).
+    /// Domain warping: the noise is read at a position that is itself pushed
+    /// around by noise, so hills bend, pinch and wander instead of lining up
+    /// in rows. A ridged layer (noise folded at its midpoint) adds sharp
+    /// crests — the saddles and lips water has to find its way over.
+    fn rough_ground(p: Vec2) -> f32 {
+        let q = p * 4.0;
+        let warp = Vec2::new(
+            surround::fbm(q + Vec2::new(5.2, 1.3)),
+            surround::fbm(q + Vec2::new(-8.3, 2.8)),
+        ) - 0.5;
+        let r = q + warp * 3.0;
+        let hills = surround::fbm(r);
+        let ridge = 1.0 - (surround::fbm(r * 1.7 + Vec2::new(31.0, 7.0)) - 0.5).abs() * 2.0;
+        hills + 0.3 * ridge.powi(3)
+    }
+
+    /// Badlands: no carved channel at all, just a lumpy, gently tilted land.
+    /// Shared by the generator and the pit-count test.
+    fn badlands_height(x: usize, z: usize) -> f32 {
+        let p = Vec2::new(x as f32 / (W - 1) as f32, z as f32 / (D - 1) as f32);
+        let tilt = 30.0 * (1.0 - p.y); // just enough that the water drifts toward the drain overall
+        tilt + 110.0 * rough_ground(p) + edge_rim(x, z)
+    }
+
+    /// Town in Peril: the same lumpy land, milder, with a town on a flat
+    /// terrace in a low pocket near the front. A shallow gully leads from the
+    /// spring straight into the pocket. Partway down, a side gully peels off
+    /// toward the drain behind a low saddle — dam the main gully below the
+    /// fork and the water backs up over the saddle and around the town.
+    const TOWN_Z: f32 = 0.70; // map fraction of the town square (centred left/right)
+    const FORK_Z: f32 = 0.38; // where the side gully leaves the main one
+    const BYPASS_END_X: f32 = 0.86; // map fraction where the side gully meets the drain
+    const TOWN_RATE: f32 = 60.0; // a gentler storm than most levels: the gullies can carry it
+
+    /// Main gully centre (cells) at row `z`: wiggles from the spring to the town.
+    fn town_gully_x(z: f32) -> f32 {
+        let mid = (W - 1) as f32 * 0.5;
+        mid + 26.0 * (PI * z / (TOWN_Z * (D - 1) as f32)).sin()
+    }
+
+    /// Side gully centre (cells) at row `z` (only meaningful below the fork).
+    fn town_bypass_x(z: f32) -> f32 {
+        let dmax = (D - 1) as f32;
+        let fork = FORK_Z * dmax;
+        // √t: leaves the main gully almost sideways, so the two split cleanly.
+        let t = ((z - fork) / (dmax - fork)).clamp(0.0, 1.0).sqrt();
+        town_gully_x(fork) + (BYPASS_END_X * (W - 1) as f32 - town_gully_x(fork)) * t
+    }
+
+    fn town_height(x: usize, z: usize) -> f32 {
+        let (xf, zf) = (x as f32, z as f32);
+        let dmax = (D - 1) as f32;
+        let mid = (W - 1) as f32 * 0.5;
+        let p = Vec2::new(xf / (W - 1) as f32, zf / dmax);
+        let (town_z, fork) = (TOWN_Z * dmax, FORK_Z * dmax);
+        // A trough's cross-section: `depth` at its centre line, fading out over ~`width` cells.
+        let trough = |dist: f32, width: f32| (-(dist / width).powi(2)).exp();
+
+        // The land tilts toward the drain, then drops off an escarpment below
+        // the town — so the town sits on a shelf, well above the drain.
+        let tilt = |zf: f32| {
+            let t = zf / dmax;
+            35.0 * (1.0 - t) + 45.0 * (1.0 - smoothstep(TOWN_Z + 0.1, 0.97, t))
+        };
+        let mut h = tilt(zf) + 45.0 * rough_ground(p);
+
+        // Main gully: spring → town. Damp the bumps inside it so no stray lump
+        // turns the water away before it reaches the town.
+        if zf <= town_z {
+            let g = trough((xf - town_gully_x(zf)).abs(), 16.0);
+            h = h * (1.0 - 0.5 * g) - 22.0 * g;
+        }
+        // Side gully: fork → drain. Shallow at the fork (that's the saddle the
+        // dammed water has to top), full depth a little further on.
+        if zf >= fork {
+            let b = trough((xf - town_bypass_x(zf)).abs(), 16.0);
+            let saddle = ((zf - fork) / 30.0).clamp(0.0, 1.0);
+            h = h * (1.0 - 0.5 * b) - 30.0 * saddle * b;
+        }
+        // The town's pocket: flat terrace (buildable) with a soft edge.
+        let r = Vec2::new(xf - mid, zf - town_z).length();
+        let flat = 1.0 - smoothstep(22.0, 40.0, r);
+        let floor = tilt(town_z) - 8.0; // below where the gully arrives — the water pools in town
+        h = h * (1.0 - flat) + floor * flat;
+        // A low ridge below the town holds the water in the pocket — the
+        // town floods before the water finds its way on to the drain.
+        let below = (-((zf - town_z - 30.0) / 7.0).powi(2)).exp();
+        let across = 1.0 - smoothstep(50.0, 75.0, (xf - mid).abs());
+        h += 14.0 * below * across;
+
+        h.max(0.0) + edge_rim(x, z)
+    }
+
+    /// Fraction of the town's terrace (within 20 cells of the square) that the
+    /// water reaches in `secs` of storm on `terrain`.
+    fn town_wet_share(terrain: &[f32], secs: f32) -> f32 {
+        let dmax = (D - 1) as f32;
+        let source = Source { x: town_gully_x(6.0).round() as usize, z: 6, radius: 5, rate: TOWN_RATE };
+        let wet = predict_wet(terrain, &source, secs);
+        let square = Vec2::new((W - 1) as f32 * 0.5, TOWN_Z * dmax);
+        let terrace: Vec<usize> = (0..W * D)
+            .filter(|&i| Vec2::new((i % W) as f32, (i / W) as f32).distance(square) < 20.0)
+            .collect();
+        terrace.iter().filter(|&&i| wet[i]).count() as f32 / terrace.len() as f32
+    }
+
+    /// The Town in Peril puzzle works: left alone, the storm floods the town;
+    /// a dam across the main gully just below the fork turns the water down
+    /// the side gully and the town stays dry.
+    #[test]
+    fn town_floods_unless_the_gully_is_dammed() {
+        let open: Vec<f32> = (0..W * D).map(|i| town_height(i % W, i / W)).collect();
+        let flooded = town_wet_share(&open, 90.0);
+        assert!(flooded > 0.5, "undammed, the town should flood (wet share {flooded})");
+
+        // A dam ~30 high (a heavy block is 28) across the gully below the fork.
+        let dam_z = FORK_Z * (D - 1) as f32 + 28.0;
+        let mut dammed = open.clone();
+        for z in (dam_z as usize)..(dam_z as usize + 5) {
+            let c = town_gully_x(z as f32);
+            for x in (c - 15.0) as usize..=(c + 15.0) as usize {
+                dammed[idx(x, z)] += 30.0;
+            }
+        }
+        let saved = town_wet_share(&dammed, 90.0);
+        assert!(saved < 0.1, "dammed, the town should stay dry (wet share {saved})");
+    }
+
+    /// Regenerate the rough-country levels (badlands, town in peril):
+    ///   cargo test generate_rough_levels -- --ignored
+    /// Water fills each hollow until it finds the lowest lip, then spills on to
+    /// the next — so where it ends up is only clear once it gets there.
+    #[test]
+    #[ignore]
+    fn generate_rough_levels() {
+        // The spring sits on the highest ground in the back quarter of the
+        // map, so the water has a choice of slopes to run down from the start.
+        let back = D / 4;
+        let (sx, sz) = (12..W - 12)
+            .flat_map(|x| (8..back).map(move |z| (x, z)))
+            .max_by(|a, b| badlands_height(a.0, a.1).total_cmp(&badlands_height(b.0, b.1)))
+            .unwrap();
+        bake_with(
+            "levels/badlands.yaml",
+            "Badlands",
+            &badlands_height,
+            SourceConfig { x: fx(sx as f32), z: fz(sz as f32), radius: 5, rate: 130.0 },
+            vec![
+                ObjectConfig { x: 0.30, z: 0.45, weight: 150.0 },
+                ObjectConfig { x: 0.62, z: 0.55, weight: 300.0 },
+                ObjectConfig { x: 0.45, z: 0.75, weight: 1000.0 },
+            ],
+            vec![SceneryKind::Trees, SceneryKind::Ruins],
+        );
+
+        bake_with(
+            "levels/town-in-peril.yaml",
+            "Town in Peril",
+            &town_height,
+            SourceConfig { x: fx(town_gully_x(6.0)), z: fz(6.0), radius: 5, rate: TOWN_RATE },
+            vec![ObjectConfig { x: fx(town_gully_x(0.2 * (D - 1) as f32)), z: 0.2, weight: 150.0 }],
+            vec![SceneryKind::Trees, SceneryKind::City],
+        );
+    }
+
+    /// Count "pits": cells lower than all 8 neighbours. Each one is a hollow
+    /// water must fill before it can move on.
+    fn count_pits(t: &[f32]) -> usize {
+        let mut pits = 0;
+        for z in 1..D - 1 {
+            for x in 1..W - 1 {
+                let h = t[idx(x, z)];
+                let lowest = (-1i32..=1)
+                    .flat_map(|dz| (-1i32..=1).map(move |dx| (dx, dz)))
+                    .filter(|&d| d != (0, 0))
+                    .all(|(dx, dz)| t[idx((x as i32 + dx) as usize, (z as i32 + dz) as usize)] > h);
+                pits += lowest as usize;
+            }
+        }
+        pits
+    }
+
+    /// The badlands really are bumpy: plenty of hollows for water to pool in
+    /// (the valley's smooth stream bed has none), and still downhill overall
+    /// so it reaches the drain eventually.
+    #[test]
+    fn badlands_is_full_of_hollows() {
+        let t: Vec<f32> = (0..W * D).map(|i| badlands_height(i % W, i / W)).collect();
+        let valley: Vec<f32> = (0..W * D).map(|i| terrain_height(i % W, i / W)).collect();
+        assert_eq!(count_pits(&valley), 0, "the smooth valley should have no hollows");
+        let pits = count_pits(&t);
+        assert!(pits >= 8, "badlands should be full of hollows, found {pits}");
+        let row_mean = |z: usize| (0..W).map(|x| t[idx(x, z)]).sum::<f32>() / W as f32;
+        assert!(row_mean(D / 8) > row_mean(D - 1 - D / 8), "badlands should slope down toward the drain");
     }
 
     /// The built-in valley round-trips through the level template format: the

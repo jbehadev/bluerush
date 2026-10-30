@@ -689,11 +689,40 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
 - **Concepts** — runtime assets vs embedded assets; `embedded://` asset source and how its path
   is built (crate name + path past `src/`); why a missing shader fails silently per material.
 
+### Session 33 (Bumpy map + Town in Peril puzzle)
+- **Badlands level** — no carved channel: `rough_ground` (flood.rs tests) is **domain-warped**
+  fbm (the noise is sampled at a position pushed around by two more noise lookups, so hills bend
+  and pinch instead of lining up) plus a **ridged** layer (`1 - |2·noise - 1|`, cubed) for sharp
+  crests. A gentle tilt keeps it draining overall. The spring is placed on the highest point in
+  the back quarter. Reused `surround::fbm` (made `pub(crate)`) instead of writing new noise.
+- **Town in Peril level** — a puzzle: a gully runs from the spring into a low pocket where the
+  `city` scenery set builds (it picks the flattest low ground, so shaping the terrace places
+  the town). A side gully splits off at `FORK_Z` (√t curve so it leaves almost sideways) and
+  starts at zero depth (the saddle). Dam the main gully below the fork → water turns aside.
+- **Tuning with the real sim, headless** — `predict_wet` runs the game's flow on any terrain
+  without Bevy, so a test (`town_floods_unless_the_gully_is_dammed`) checks the puzzle: undammed
+  >50% of the town is wet after 90 s; with a 30-high dam <10%. A throwaway test dumped wet maps
+  as PNGs to see *why* it failed. Lessons found that way:
+  - Volume matters: at rate 110 the storm out-pours what a narrow gully carries, so the whole
+    back of the map became one lake. Fix: wider/deeper gullies, rate 60, steeper tilt.
+  - A flattened terrace *above* the gully floor makes the gully dead-end before the town.
+  - The city only builds above the sand line (18% of the level's height range, and the rim
+    raises the max), so the town can't simply sit low — it sits on a **shelf** above an
+    escarpment that drops to the drain.
+- `count_pits` test helper: a cell lower than all 8 neighbours is a hollow. Badlands has many;
+  the smooth valley has none. Also a scenery test that the shipped town builds in the pocket.
+- Generator: `cargo test generate_rough_levels -- --ignored` (new `bake_with` picks scenery).
+- Tests: 59 (+3).
+
 ## Where We Left Off (current)
 
-**Session 33 (`feat/breakable-walls`)** — walls break: each piece wears when water stands past ¾
+**Session 34 (`feat/breakable-walls`)** — walls break: each piece wears when water stands past ¾
 of its height or pours over its top, then washes away as a light block. Next: object (block)
 destruction, or polish (debris/splash on breach, damage tint).
+
+**Session 33 (`feat/bumpy-map`)** — Badlands (lumpy noise terrain, unpredictable water) and Town
+in Peril (dam the gully to save the town). Next: a win/lose check for the town (count surviving
+buildings), or ship `levels/` with releases (release.yml packages only the binary today).
 
 **Session 29 (`feat/scenery-surround`)** — surround land + mountains replace the grey band;
 shore foam on fast, thin water. Next: object destruction, or planar reflections.
@@ -772,6 +801,10 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 ## What Comes Next
 - ~~**Breakable walls**~~ Done (session 33). Possible polish: splash/debris when a piece goes,
   darker tint as health drops, R repairs walls.
+- **Town in Peril win/lose (next)** — count surviving town buildings; "Town saved!" if most
+  stand after N minutes of storm, "Town lost" otherwise. More puzzle levels on the same idea.
+- **Ship levels with releases** — `release.yml` packages only the binary, so releases fall back
+  to the built-in valley; embed the level files or package `levels/`.
 - ~~**Scenery destruction**~~ Done (session 28). Possible polish: splash/dust puffs on collapse,
   damage tint/cracks, debris colliding with blocks/walls, debris jams that dam.
 - **Object destruction (next)** — reuse `water_load` + `wear` for player blocks: a strong
