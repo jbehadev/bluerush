@@ -1,0 +1,15 @@
+name: Town in Peril
+heightmap: town-in-peril.png
+height_scale: 185.29938
+source:
+  x: 0.5078207
+  z: 0.020066889
+  radius: 5
+  rate: 60.0
+objects:
+- x: 0.56798536
+  z: 0.2
+  weight: 150.0
+scenery:
+- trees
+- city
