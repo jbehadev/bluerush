@@ -86,6 +86,13 @@ const WALL_CHUNK: f32 = 0.3; // a breached piece washes off as a block this shar
 const WALL_EXTRA_HEIGHT: f32 = 0.3; // the heaviest wall stands this much taller than its block (lightest: same)
 
 // UI / controls.
+// Pumps lift water from an intake to an outlet through a pipe.
+const PUMP_RATE: f32 = 3000.0; // water a pump moves per second (depth summed over its cells; the source is ~13000)
+const PUMP_R: i32 = 3; // intake/outlet patch radius in cells (a single cell would drain into a pit)
+const PUMP_MIN_LEN: f32 = CELL * 4.0; // a drag shorter than this (world units) doesn't place a pump
+const PIPE_RADIUS: f32 = 1.5;
+const PIPE_CLEARANCE: f32 = 4.0; // how far the pipe runs above the highest ground along its route
+
 const PANEL_WIDTH: f32 = 120.0; // left toolbar width (world clicks under it are ignored)
 const WEIGHTS: [f32; 5] = [200.0, 500.0, 1000.0, 2000.0, 5000.0]; // selectable object weights
 const SINE_FREQ: f32 = 1.2; // rad/sec for the Sine wave pattern
@@ -407,7 +414,19 @@ impl WallPiece {
     }
 }
 
-/// An in-progress left-button drag with the block tool. `start` is where the
+/// A pump: each frame it draws up to `PUMP_RATE` of water from the `intake`
+/// cells and lets it out over the `outlet` cells, at the far end of a pipe
+/// from `a` (intake, world x, z) to `b` (outlet). Its housings and pipe are
+/// child meshes, so despawning the pump removes them too.
+#[derive(Component)]
+struct Pump {
+    a: Vec2,
+    b: Vec2,
+    intake: Vec<usize>,
+    outlet: Vec<usize>,
+}
+
+/// An in-progress left-button drag with the block or pump tool. `start` is where the
 /// button went down; `last` tracks the latest cursor hit so a release over the
 /// UI panel / off the map still knows where the drag ended.
 #[derive(Resource, Default)]
@@ -420,6 +439,7 @@ struct WallDrag {
 #[derive(Resource)]
 struct ObjectAssets {
     cube: Handle<Mesh>,
+    pipe: Handle<Mesh>, // unit cylinder (radius 1, height 1, along +Y), scaled per pipe run
 }
 
 /// Something that dams the flow besides blocks and walls (standing scenery):
@@ -442,6 +462,7 @@ enum SelectedTool {
     Object(f32),
     Pour,
     Erase,
+    Pump,
 }
 
 /// How the water source feeds the stream.
@@ -494,6 +515,8 @@ struct WeightButton(f32);
 struct PourButton;
 #[derive(Component)]
 struct EraseButton;
+#[derive(Component)]
+struct PumpButton;
 #[derive(Component)]
 struct WaveButton(WavePattern);
 #[derive(Component)]
@@ -808,6 +831,122 @@ fn spawn_wall(
         });
 }
 
+/// The cells of the square patch of radius `r` around (cx, cz) that lie on the grid.
+fn patch_cells(cx: usize, cz: usize, r: i32) -> Vec<usize> {
+    let mut cells = Vec::new();
+    for dz in -r..=r {
+        for dx in -r..=r {
+            let (x, z) = (cx as i32 + dx, cz as i32 + dz);
+            if x >= 0 && z >= 0 && x < W as i32 && z < D as i32 {
+                cells.push(idx(x as usize, z as usize));
+            }
+        }
+    }
+    cells
+}
+
+/// A transform that stretches the unit `pipe` cylinder from `p0` to `p1`.
+fn pipe_run(p0: Vec3, p1: Vec3) -> Transform {
+    let len = p0.distance(p1);
+    let dir = (p1 - p0) / len.max(1e-6);
+    Transform {
+        translation: (p0 + p1) * 0.5,
+        rotation: Quat::from_rotation_arc(Vec3::Y, dir),
+        scale: Vec3::new(PIPE_RADIUS, len, PIPE_RADIUS),
+    }
+}
+
+/// Spawn a pump with its intake at `a` and outlet at `b`: a housing on the
+/// ground at each end, joined by a pipe that rises up out of the intake,
+/// runs across above the highest ground between them, and drops into the outlet.
+fn spawn_pump(
+    commands: &mut Commands,
+    assets: &ObjectAssets,
+    materials: &mut Assets<StandardMaterial>,
+    terrain: &[f32],
+    a: Vec2,
+    b: Vec2,
+) {
+    let ground = |p: Vec2| { let (gx, gz) = cell_of(p); terrain[idx(gx, gz)] };
+    let steps = (a.distance(b) / CELL).ceil().max(1.0) as usize;
+    let peak = (0..=steps)
+        .map(|k| ground(a.lerp(b, k as f32 / steps as f32)))
+        .fold(f32::MIN, f32::max)
+        + PIPE_CLEARANCE;
+    let (ca, cb) = (cell_of(a), cell_of(b));
+    let housing = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.30, 0.32, 0.36),
+        metallic: 0.6,
+        perceptual_roughness: 0.45,
+        ..default()
+    });
+    let pipe = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.55, 0.57, 0.60),
+        metallic: 0.8,
+        perceptual_roughness: 0.35,
+        ..default()
+    });
+    let at = |p: Vec2, y: f32| Vec3::new(p.x, y, p.y);
+    let box_size = Vec3::new(8.0, 6.0, 8.0);
+
+    commands
+        .spawn((
+            Pump { a, b, intake: patch_cells(ca.0, ca.1, PUMP_R), outlet: patch_cells(cb.0, cb.1, PUMP_R) },
+            Transform::default(),
+            Visibility::default(),
+        ))
+        .with_children(|parent| {
+            for p in [a, b] {
+                let g = ground(p);
+                parent.spawn((
+                    Mesh3d(assets.cube.clone()),
+                    MeshMaterial3d(housing.clone()),
+                    Transform::from_translation(at(p, g + box_size.y * 0.5 - 1.0)).with_scale(box_size),
+                ));
+                parent.spawn((
+                    Mesh3d(assets.pipe.clone()),
+                    MeshMaterial3d(pipe.clone()),
+                    pipe_run(at(p, g), at(p, peak + PIPE_RADIUS)),
+                ));
+            }
+            parent.spawn((Mesh3d(assets.pipe.clone()), MeshMaterial3d(pipe), pipe_run(at(a, peak), at(b, peak))));
+        });
+}
+
+/// Move up to `want` water from the `intake` cells to the `outlet` cells.
+/// Each intake cell gives up the same share of what it holds (so none goes
+/// negative), and the outlet cells split it evenly. Returns how much moved.
+fn pump_step(depth: &mut [f32], intake: &[usize], outlet: &[usize], want: f32) -> f32 {
+    let held: f32 = intake.iter().map(|&i| depth[i].max(0.0)).sum();
+    if held <= 0.0 || outlet.is_empty() {
+        return 0.0;
+    }
+    let share = (want / held).min(1.0);
+    let moved = held * share;
+    for &i in intake {
+        depth[i] -= depth[i].max(0.0) * share;
+    }
+    let each = moved / outlet.len() as f32;
+    for &i in outlet {
+        depth[i] += each;
+    }
+    moved
+}
+
+/// Run every pump for one frame; the outflow kicks ripples so the outlet looks alive.
+fn run_pumps(paused: Res<Paused>, pumps: Query<&Pump>, mut water: ResMut<Water>) {
+    if paused.0 {
+        return;
+    }
+    for pump in &pumps {
+        if pump_step(&mut water.depth, &pump.intake, &pump.outlet, PUMP_RATE * DT) > 0.0 {
+            for &i in &pump.outlet {
+                water.rvel[i] -= 0.6;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -848,6 +987,7 @@ impl Plugin for FloodPlugin {
                     handle_weight_buttons,
                     handle_pour_button,
                     handle_erase_button,
+                    handle_pump_button,
                     handle_wave_buttons,
                     handle_flood_button,
                     update_flood_button,
@@ -870,6 +1010,7 @@ impl Plugin for FloodPlugin {
                     drain_on_key,
                     run_source,
                     handle_click,
+                    run_pumps,
                     build_obstacles,
                     wear_walls,
                     step_flow,
@@ -1049,7 +1190,8 @@ fn setup(
     commands.insert_resource(Terrain(terrain));
     commands.insert_resource(water);
     commands.insert_resource(WaterMesh(water_handle));
-    commands.insert_resource(ObjectAssets { cube });
+    let pipe = meshes.add(Cylinder::new(1.0, 1.0));
+    commands.insert_resource(ObjectAssets { cube, pipe });
     commands.insert_resource(Obstacle(vec![0.0; W * D]));
     commands.insert_resource(source);
 }
@@ -1268,6 +1410,7 @@ fn handle_click(
     mut materials: ResMut<Assets<StandardMaterial>>,
     objects: Query<(Entity, &FloatObject)>,
     walls: Query<(Entity, &Wall)>,
+    pumps: Query<(Entity, &Pump)>,
     mut drag: ResMut<WallDrag>,
     mut commands: Commands,
 ) {
@@ -1279,10 +1422,11 @@ fn handle_click(
     let Ok((camera, cam_t)) = cameras.single() else { return };
     let hit = cursor_hit(window, camera, cam_t, &terrain.0, &water);
 
-    // Block tool: the press only remembers where the drag began; the release
-    // decides — a short drag drops one block, a long one builds a wall. The
-    // release works even off the map, using the last point the cursor was over.
-    if let SelectedTool::Object(w) = *tool {
+    // Block and pump tools: the press only remembers where the drag began; the
+    // release decides — for blocks a short drag drops one block and a long one
+    // builds a wall; for pumps the drag runs the pipe from intake to outlet.
+    // The release works even off the map, using the last point the cursor was over.
+    if matches!(*tool, SelectedTool::Object(_) | SelectedTool::Pump) {
         if let Some(h) = hit {
             drag.last = Vec2::new(h.x, h.z);
             if mouse.just_pressed(MouseButton::Left) {
@@ -1292,10 +1436,17 @@ fn handle_click(
         if mouse.just_released(MouseButton::Left) {
             if let Some(start) = drag.start.take() {
                 let end = drag.last;
-                if start.distance(end) < wall_min_len(w) {
-                    spawn_object(&mut commands, assets.cube.clone(), &mut materials, &terrain.0, start, w);
-                } else {
-                    spawn_wall(&mut commands, assets.cube.clone(), &mut materials, &terrain.0, start, end, w);
+                match *tool {
+                    SelectedTool::Object(w) if start.distance(end) < wall_min_len(w) => {
+                        spawn_object(&mut commands, assets.cube.clone(), &mut materials, &terrain.0, start, w);
+                    }
+                    SelectedTool::Object(w) => {
+                        spawn_wall(&mut commands, assets.cube.clone(), &mut materials, &terrain.0, start, end, w);
+                    }
+                    SelectedTool::Pump if start.distance(end) >= PUMP_MIN_LEN => {
+                        spawn_pump(&mut commands, &assets, &mut materials, &terrain.0, start, end);
+                    }
+                    _ => {} // a pump drag too short to tell intake from outlet
                 }
             }
         }
@@ -1316,7 +1467,7 @@ fn handle_click(
                 }
             }
         }
-        SelectedTool::Object(_) => {} // handled above
+        SelectedTool::Object(_) | SelectedTool::Pump => {} // handled above
         SelectedTool::Erase => {
             if mouse.just_pressed(MouseButton::Left) {
                 // Delete the object nearest the cursor (within ~its footprint).
@@ -1339,8 +1490,15 @@ fn handle_click(
                         best = Some((e, dist));
                     }
                 }
+                // And pumps: anywhere along the pipe.
+                for (e, pump) in &pumps {
+                    let (dist, _) = closest_on_segment(target, pump.a, pump.b);
+                    if dist < CELL * 2.5 && best.map_or(true, |(_, bd)| dist < bd) {
+                        best = Some((e, dist));
+                    }
+                }
                 if let Some((e, _)) = best {
-                    commands.entity(e).despawn(); // also removes a wall's child pieces
+                    commands.entity(e).despawn(); // also removes a wall's pieces / a pump's pipe
                 }
             }
         }
@@ -1355,6 +1513,8 @@ pub(crate) const BTN_OFF: Color = Color::srgb(0.22, 0.24, 0.30);
 const BTN_ON: Color = Color::srgb(0.85, 0.72, 0.20);
 const POUR_OFF: Color = Color::srgb(0.15, 0.35, 0.55);
 pub(crate) const POUR_ON: Color = Color::srgb(0.25, 0.65, 0.95);
+const PUMP_OFF: Color = Color::srgb(0.30, 0.32, 0.36);
+const PUMP_ON: Color = Color::srgb(0.60, 0.64, 0.72);
 
 fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
     commands
@@ -1529,6 +1689,27 @@ fn setup_ui(mut commands: Commands, library: Res<LevelLibrary>) {
                         TextColor(Color::WHITE),
                     ));
                 });
+            panel
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(26.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        margin: UiRect::top(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(PUMP_OFF),
+                    PumpButton,
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        Text::new("Pump"),
+                        TextFont { font_size: FontSize::Px(11.0), ..default() },
+                        TextColor(Color::WHITE),
+                    ));
+                });
 
             panel.spawn((
                 Text::new("WAVE"),
@@ -1662,6 +1843,15 @@ fn handle_erase_button(
     }
 }
 
+fn handle_pump_button(
+    q: Query<(), (Added<Pressed>, With<PumpButton>)>,
+    mut tool: ResMut<SelectedTool>,
+) {
+    if !q.is_empty() {
+        *tool = SelectedTool::Pump;
+    }
+}
+
 /// Pick a wave pattern from the panel, or press W to cycle
 /// Flood → Sine → Random → Off.
 fn handle_wave_buttons(
@@ -1745,7 +1935,7 @@ fn switch_level(
     assets: Res<ObjectAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     objects: Query<Entity, With<FloatObject>>,
-    walls: Query<Entity, With<Wall>>,
+    built: Query<Entity, Or<(With<Wall>, With<Pump>)>>,
     mut scenery: ResMut<ActiveScenery>,
     mut storm: ResMut<Storm>,
     mut label: Query<&mut Text, With<LevelDropdownLabel>>,
@@ -1776,7 +1966,7 @@ fn switch_level(
     water.flow.iter_mut().for_each(|v| *v = Vec2::ZERO);
     storm.elapsed = 0.0;
 
-    for entity in objects.iter().chain(walls.iter()) {
+    for entity in objects.iter().chain(built.iter()) {
         commands.entity(entity).despawn();
     }
     // The new terrain + scenery list trigger `scenery::rebuild_scenery`.
@@ -1804,6 +1994,10 @@ fn update_tool_highlight(
         &mut BackgroundColor,
         (With<EraseButton>, Without<WeightButton>, Without<PourButton>),
     >,
+    mut pump: Query<
+        &mut BackgroundColor,
+        (With<PumpButton>, Without<WeightButton>, Without<PourButton>, Without<EraseButton>),
+    >,
 ) {
     if !tool.is_changed() {
         return;
@@ -1818,6 +2012,9 @@ fn update_tool_highlight(
         let on = Color::srgb(0.90, 0.35, 0.30);
         let off = Color::srgb(0.45, 0.20, 0.18);
         *bg = BackgroundColor(if *tool == SelectedTool::Erase { on } else { off });
+    }
+    for mut bg in &mut pump {
+        *bg = BackgroundColor(if *tool == SelectedTool::Pump { PUMP_ON } else { PUMP_OFF });
     }
 }
 
@@ -2039,6 +2236,26 @@ fn draw_placement_cursor(
             edge(p(s, -s), p(s, s), col);
             edge(p(s, s), p(-s, s), col);
             edge(p(-s, s), p(-s, -s), col);
+        }
+        // A square over the intake patch at the drag start (or the cursor before
+        // the press), and while dragging the pipe and the outlet patch.
+        SelectedTool::Pump => {
+            let col = Color::srgb(0.80, 0.85, 0.95);
+            let end = Vec2::new(hit.x, hit.z);
+            let start = drag.start.unwrap_or(end);
+            let s = (PUMP_R as f32 + 0.5) * CELL;
+            let at = |p: Vec2| { let (gx, gz) = cell_of(p); Vec3::new(p.x, terrain.0[idx(gx, gz)] + 0.5, p.y) };
+            let mut square = |c: Vec2| {
+                let k = [Vec2::new(-s, -s), Vec2::new(s, -s), Vec2::new(s, s), Vec2::new(-s, s)];
+                for n in 0..4 {
+                    edge(at(c + k[n]), at(c + k[(n + 1) % 4]), col);
+                }
+            };
+            square(start);
+            if start.distance(end) >= PUMP_MIN_LEN {
+                square(end);
+                edge(at(start), at(end), col);
+            }
         }
     }
 }
@@ -3356,6 +3573,39 @@ mod tests {
             .fold(0.0f32, f32::max);
         assert!(max_err < 0.01, "max height error after round trip: {max_err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pump_moves_water_without_making_or_losing_any() {
+        let mut depth = vec![2.0, 4.0, 0.0, 0.0, 0.0];
+        let moved = pump_step(&mut depth, &[0, 1], &[3, 4], 3.0);
+        assert!((moved - 3.0).abs() < 1e-5);
+        assert!((depth.iter().sum::<f32>() - 6.0).abs() < 1e-5, "total water unchanged");
+        assert_eq!(depth[3], depth[4], "the outlet cells share it evenly");
+        // Each intake cell gave the same half of what it held.
+        assert!((depth[0] - 1.0).abs() < 1e-5 && (depth[1] - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_pump_cant_take_more_than_the_intake_holds() {
+        let mut depth = vec![1.0, 0.5, 0.0];
+        let moved = pump_step(&mut depth, &[0, 1], &[2], 100.0);
+        assert!((moved - 1.5).abs() < 1e-5);
+        assert!(depth[0].abs() < 1e-6 && depth[1].abs() < 1e-6, "drained dry, not negative");
+        assert!((depth[2] - 1.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_dry_pump_moves_nothing() {
+        let mut depth = vec![0.0, 0.0, 3.0];
+        assert_eq!(pump_step(&mut depth, &[0, 1], &[2], 10.0), 0.0);
+        assert_eq!(depth, vec![0.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn pump_patches_are_clipped_to_the_map() {
+        assert_eq!(patch_cells(W / 2, D / 2, PUMP_R).len(), ((2 * PUMP_R + 1) as usize).pow(2));
+        assert_eq!(patch_cells(0, 0, PUMP_R).len(), ((PUMP_R + 1) as usize).pow(2), "corner keeps only on-map cells");
     }
 }
 
