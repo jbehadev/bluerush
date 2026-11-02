@@ -54,7 +54,8 @@ source:                 # where water enters the map
   x: 0.59               # 0.0 = left edge … 1.0 = right edge
   z: 0.03               # 0.0 = back edge … 1.0 = front edge (the drain)
   radius: 5             # source patch radius in cells at 150×150 (× MAP_SCALE in-game)
-  rate: 110.0           # water depth added per second
+  rate: 110.0           # water depth added per second (0 = no stream from the cloud)
+  map_rain: 0.6         # optional: depth/sec rained on EVERY cell of the map (default 0 = off)
 objects:                # starting blocks (optional)
   - { x: 0.71, z: 0.50, weight: 4000.0 }   # heavy — dams the stream
   - { x: 0.31, z: 0.34, weight: 150.0 }    # light — washes away
@@ -73,6 +74,13 @@ don't place them by hand:
 The same terrain always gives the same layout. The **SCENERY** buttons in the
 toolbar toggle each set live. For now scenery is decoration — water flows
 through it.
+
+**Map-wide rain.** Set `map_rain` and the storm rains on the whole map, not
+just the cloud's patch: rain runs off the hills, gathers in the valleys and
+fills the hollows. The cloud becomes a see-through layer high over the map
+(it fades out if you fly the camera above it) and raindrops fall everywhere.
+Set `rate: 0` as well for rain only — the source's `x`/`z` then do nothing.
+Every cell is wet, so the water sim does more work than on a stream level.
 
 All positions are **fractions of the map (0.0–1.0)**, so a level is
 independent of both the image size and the simulation grid resolution.
@@ -95,6 +103,7 @@ level's starting objects:
 | Waterfall | `levels/waterfall.yaml` | A river crosses a high plateau and pours off a ~60-unit cliff into a plunge pool, then winds down a lower valley. Light blocks ride the river over the edge; a 2500 kg block dams the lower river. |
 | Cascades | `levels/cascades.yaml` | Four terraces, each ~25 units lower. The stream zig-zags across the map, dropping off a notch at alternating ends of each step into a small pool. A 2000 kg block sits on the third step. |
 | Badlands | `levels/badlands.yaml` | No channel at all — lumpy, domain-warped noise terrain full of hollows and saddles. The spring sits on the highest hill at the back; the water fills each hollow until it finds the lowest lip, then spills on. You can't tell where it'll go until it gets there. |
+| Monsoon | `levels/monsoon.yaml` | No spring — rain falls on the whole map (`map_rain`). Hillsides shed into two side valleys that join a winding main valley; three ponds down it fill, spill over their lips and feed the next, on to the drain. Three blocks sit in the main valley for the runoff to carry. |
 | Town in Peril | `levels/town-in-peril.yaml` | A puzzle. A town sits in a low pocket on a shelf, and the gully from the spring runs straight into it — left alone, the town floods in about a minute and a half. Partway down, a side gully splits off to the drain behind a low saddle: dam the main gully just below the fork (a heavy block or two) and the water turns aside. |
 
 ## Making a new level
@@ -111,13 +120,14 @@ level's starting objects:
 
 The committed level files are baked from generator functions in
 `src/flood.rs` (`terrain_height` for the valley; the `generate_extra_levels` and
-`generate_cliff_levels` and `generate_rough_levels` tests for the rest). To re-bake after changing them:
+`generate_cliff_levels`, `generate_rough_levels` and `generate_monsoon_level` tests for the rest). To re-bake after changing them:
 
 ```sh
 cargo test generate_valley_level -- --ignored
 cargo test generate_extra_levels -- --ignored
 cargo test generate_cliff_levels -- --ignored
 cargo test generate_rough_levels -- --ignored
+cargo test generate_monsoon_level -- --ignored
 ```
 
 Hand-edits to the PNGs survive until you re-run these — the generators are

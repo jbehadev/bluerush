@@ -716,6 +716,11 @@ assets/shaders/terrain.wesl — ground cover (sand / grass / rock by height, slo
 
 ## Where We Left Off (current)
 
+**Session 35 (`feat/map-wide-rain`)** — levels can rain on the whole map (`map_rain` in the
+yaml); new Monsoon level built for it (side valleys → main valley → three spilling ponds); the
+map-wide cloud is a see-through layer above the camera. Next: speed up the flow step for
+all-wet maps if it bites, or the Town in Peril win/lose check.
+
 **Session 34 (`feat/breakable-walls`)** — walls break: each piece wears when water stands past ¾
 of its height or pours over its top, then washes away as a light block. Next: object (block)
 destruction, or polish (debris/splash on breach, damage tint).
@@ -798,7 +803,35 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 - Tests: 61 (+5: erosion lowers the dam, heavy walls are taller, ¾ threshold + calm lake,
   head on a slope, overtopping needs fast water on the top).
 
+### Session 35 (Map-wide rain + Monsoon level)
+- **`map_rain`** — optional yaml field in `source:` (depth/sec on every cell, `#[serde(default)]`
+  so old levels load unchanged; `skip_serializing_if` keeps it out of baked yaml when 0).
+  `rain_on_map` adds it in `run_source` (scaled by storm / wave / surge like the cloud) and in
+  `predict_wet`, so scenery stays out of the runoff channels. No ripple kick on every cell —
+  that just jitters the whole surface. `rate: 0` turns the cloud's stream off.
+- **`Source::from_config`** — one place resolves a level's source to grid cells (was copied in
+  setup and level switching).
+- **Monsoon level** — `monsoon_height`: steeper tilt than the badlands, gentler bumps, two
+  side valleys into a winding main valley, three flat-bottomed ponds that fill and spill.
+  `map_rain: 0.6`, `rate: 0`. Bug caught by its test: "damping the bumps" multiplied the WHOLE
+  height (base + tilt too), carving canyons ~100 deep and clamping ponds to 0 — damp only the
+  noise, cut valleys a fixed depth.
+- **Visuals** — `RainArea { Patch, Map }` enum in `rain.rs` picks the behaviour with `match`.
+  Map: one flat, translucent (`AlphaMode::Blend`) cloud over the whole map, 250 above the
+  highest ground (above the default camera), fading out if the camera climbs past it; up to
+  6000 drops spread over the map square instead of the disc under the cloud.
+- **Tuning by playtest** — map rain on top of the stream wasn't what was wanted (rain should
+  *replace* the cloud's stream); 0.1 → 0.6 for real runoff; a cloud between camera and floor
+  (even at 18% opacity) hid the ground → lifted above the camera.
+- **Performance note** — `flow_iteration` skips dry cells; with rain everywhere nothing is dry,
+  so a flow step costs ~6× more and `predict_wet` at level load goes ~0.6s → ~5s. Fine on the
+  M4 Max; candidate for optimisation (rayon, or reusing the `old`/`delta` buffers).
+- Tests: 69 (+5: old yaml has no map rain, map rain wets evenly, Monsoon ponds hold water and
+  the land drains, map drops reach every quadrant, only `map_rain` levels get the map cloud).
+
 ## What Comes Next
+- **Map-wide rain polish (optional)** — faster flow step for all-wet maps; raindrop splashes
+  (sparse ripple kicks); drifting cloud puffs; more rain levels.
 - ~~**Breakable walls**~~ Done (session 33). Possible polish: splash/debris when a piece goes,
   darker tint as health drops, R repairs walls.
 - **Town in Peril win/lose (next)** — count surviving town buildings; "Town saved!" if most

@@ -1,0 +1,22 @@
+name: Monsoon
+heightmap: monsoon.png
+height_scale: 219.47855
+source:
+  x: 0.6168259
+  z: 0.3
+  radius: 5
+  rate: 0.0
+  map_rain: 0.6
+objects:
+- x: 0.6046303
+  z: 0.22
+  weight: 150.0
+- x: 0.5938289
+  z: 0.44
+  weight: 300.0
+- x: 0.47374758
+  z: 0.67
+  weight: 1000.0
+scenery:
+- trees
+- ruins
