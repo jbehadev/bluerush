@@ -191,7 +191,7 @@ fn builtin_level() -> LoadedLevel {
     LoadedLevel {
         name: "Valley".into(),
         heights,
-        source: SourceConfig { x: fx(channel_center(4)), z: fz(4), radius: SOURCE_R, rate: SOURCE_RATE },
+        source: SourceConfig { x: fx(channel_center(4)), z: fz(4), radius: SOURCE_R, rate: SOURCE_RATE, map_rain: 0.0 },
         objects: vec![
             ObjectConfig { x: fx(channel_center(D / 2)), z: fz(D / 2), weight: 4000.0 },
             ObjectConfig { x: fx(channel_center(D / 3)), z: fz(D / 3), weight: 150.0 },
@@ -264,12 +264,27 @@ fn scan_levels(dir: &std::path::Path) -> Vec<LevelEntry> {
 
 /// Where (and how fast) water enters the map, resolved from the level to grid
 /// cells. `run_source` feeds this patch every frame.
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub(crate) struct Source {
     pub(crate) x: usize,
     pub(crate) z: usize,
     pub(crate) radius: i32,
     rate: f32,
+    /// Depth/sec added to every cell of the map (0 = rain only under the cloud).
+    pub(crate) map_rain: f32,
+}
+
+impl Source {
+    /// Resolve a level's source from map fractions to grid cells.
+    fn from_config(c: &SourceConfig) -> Self {
+        Source {
+            x: (c.x * (W - 1) as f32).round().clamp(0.0, (W - 1) as f32) as usize,
+            z: (c.z * (D - 1) as f32).round().clamp(0.0, (D - 1) as f32) as usize,
+            radius: c.radius * MAP_SCALE as i32,
+            rate: c.rate,
+            map_rain: c.map_rain,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -1018,12 +1033,7 @@ fn setup(
     }
 
     // The water source, resolved from map fractions to grid cells.
-    let source = Source {
-        x: (loaded.source.x * (W - 1) as f32).round().clamp(0.0, (W - 1) as f32) as usize,
-        z: (loaded.source.z * (D - 1) as f32).round().clamp(0.0, (D - 1) as f32) as usize,
-        radius: loaded.source.radius * MAP_SCALE as i32,
-        rate: loaded.source.rate,
-    };
+    let source = Source::from_config(&loaded.source);
 
     // Catalogue every level sitting next to the configured one (after the
     // template write above, so a fresh template lists itself too).
@@ -1778,12 +1788,7 @@ fn switch_level(
             cell_to_world(cx, cz), obj.weight);
     }
 
-    *source = Source {
-        x: (loaded.source.x * (W - 1) as f32).round().clamp(0.0, (W - 1) as f32) as usize,
-        z: (loaded.source.z * (D - 1) as f32).round().clamp(0.0, (D - 1) as f32) as usize,
-        radius: loaded.source.radius * MAP_SCALE as i32,
-        rate: loaded.source.rate,
-    };
+    *source = Source::from_config(&loaded.source);
 
     for mut text in &mut label {
         *text = Text::new(loaded.name.clone());
@@ -2088,6 +2093,7 @@ fn run_source(
     if mult > 0.0 {
         let (r, rate) = rain_patch(&source);
         add_water(&mut water, source.x, source.z, r, rate * mult * DT, -0.8);
+        rain_on_map(&mut water.depth, &source, mult * DT);
     }
     rainfall.0 = mult;
 }
@@ -2100,6 +2106,16 @@ pub(crate) fn rain_patch(source: &Source) -> (i32, f32) {
     let narrow = (2 * source.radius + 1) as f32;
     let wide = (2 * r + 1) as f32;
     (r, source.rate * RAIN_RATE_SCALE * (narrow / wide).powi(2))
+}
+
+/// Map-wide rain: `frac` of a second's worth of the level's `map_rain` on
+/// every cell. No ripple kick — a kick on every cell at once would just
+/// jitter the whole surface.
+fn rain_on_map(depth: &mut [f32], source: &Source, frac: f32) {
+    let amount = source.map_rain * RAIN_RATE_SCALE * frac;
+    if amount > 0.0 {
+        depth.iter_mut().for_each(|d| *d += amount);
+    }
 }
 
 /// The storm's strength `secs` into a level: RAIN_START at first, easing up to
@@ -2161,7 +2177,9 @@ pub(crate) fn predict_wet(terrain: &[f32], source: &Source, secs: f32) -> Vec<bo
     let mut flow = vec![Vec2::ZERO; W * D];
     for frame in 0..(secs / DT) as usize {
         let (r, rate) = rain_patch(source);
-        pour(&mut depth, source.x, source.z, r, rate * storm_intensity(frame as f32 * DT) * DT);
+        let mult = storm_intensity(frame as f32 * DT);
+        pour(&mut depth, source.x, source.z, r, rate * mult * DT);
+        rain_on_map(&mut depth, source, mult * DT);
         for _ in 0..FLOW_ITERS {
             flow_iteration(&mut depth, terrain, W, D, &mut flow);
         }
@@ -2426,7 +2444,7 @@ fn build_terrain_mesh(t: &[f32]) -> Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f32::consts::PI;
+    use std::f32::consts::{PI, TAU};
 
     #[test]
     fn pan_forward_matches_camera_view() {
@@ -2466,7 +2484,7 @@ mod tests {
     #[test]
     fn predict_wet_reaches_downhill_but_not_the_hills() {
         let t = builtin_level().heights;
-        let source = Source { x: channel_center(4).round() as usize, z: 4, radius: SOURCE_R, rate: SOURCE_RATE };
+        let source = Source { x: channel_center(4).round() as usize, z: 4, radius: SOURCE_R, rate: SOURCE_RATE, map_rain: 0.0 };
         let wet = predict_wet(&t, &source, 4.0);
         assert!(wet[idx(source.x, source.z)], "the source itself is wet");
         assert!(!wet[idx(2, D / 2)], "the high bank at the map's side stays dry");
@@ -2474,8 +2492,20 @@ mod tests {
     }
 
     #[test]
+    fn map_rain_wets_every_cell_evenly_and_is_off_by_default() {
+        let mut source = Source { x: 50, z: 50, radius: 5, rate: 110.0, map_rain: 0.0 };
+        let mut depth = vec![0.0; W * D];
+        rain_on_map(&mut depth, &source, 1.0);
+        assert!(depth.iter().all(|&d| d == 0.0), "no map_rain → no water");
+        source.map_rain = 0.2;
+        rain_on_map(&mut depth, &source, 0.5);
+        let want = 0.2 * RAIN_RATE_SCALE * 0.5;
+        assert!(depth.iter().all(|&d| (d - want).abs() < 1e-6));
+    }
+
+    #[test]
     fn rain_patch_is_wider_and_pours_the_scaled_total() {
-        let source = Source { x: 50, z: 50, radius: 5, rate: 110.0 };
+        let source = Source { x: 50, z: 50, radius: 5, rate: 110.0, map_rain: 0.0 };
         let (r, rate) = rain_patch(&source);
         assert!(r > source.radius);
         let total = |radius: i32, rate: f32| ((2 * radius + 1) as f32).powi(2) * rate;
@@ -2845,7 +2875,7 @@ mod tests {
             "levels/winding-river.yaml",
             "Winding River",
             &winding,
-            SourceConfig { x: fx(center(4.0)), z: fz(4.0), radius: 4, rate: 120.0 },
+            SourceConfig { x: fx(center(4.0)), z: fz(4.0), radius: 4, rate: 120.0, map_rain: 0.0 },
             vec![
                 ObjectConfig { x: fx(center(0.20 * dmax)), z: 0.20, weight: 150.0 },
                 ObjectConfig { x: fx(center(0.45 * dmax)), z: 0.45, weight: 800.0 },
@@ -2884,7 +2914,7 @@ mod tests {
             "levels/river-delta.yaml",
             "River Delta",
             &delta,
-            SourceConfig { x: fx(main_c(4.0)), z: fz(4.0), radius: 5, rate: 140.0 },
+            SourceConfig { x: fx(main_c(4.0)), z: fz(4.0), radius: 5, rate: 140.0, map_rain: 0.0 },
             vec![
                 ObjectConfig { x: fx(stem_end), z: split, weight: 2500.0 },
                 ObjectConfig { x: fx(branch_x(0, 0.75)), z: 0.75, weight: 150.0 },
@@ -2919,7 +2949,7 @@ mod tests {
             "levels/highland-lake.yaml",
             "Highland Lake",
             &lake,
-            SourceConfig { x: 0.5, z: fz(4.0), radius: 5, rate: 120.0 },
+            SourceConfig { x: 0.5, z: fz(4.0), radius: 5, rate: 120.0, map_rain: 0.0 },
             vec![
                 ObjectConfig { x: 0.45, z: 0.32, weight: 150.0 },
                 ObjectConfig { x: 0.56, z: 0.40, weight: 300.0 },
@@ -2974,7 +3004,7 @@ mod tests {
             "levels/waterfall.yaml",
             "Waterfall",
             &waterfall,
-            SourceConfig { x: fx(upper_c(4.0)), z: fz(4.0), radius: 5, rate: 120.0 },
+            SourceConfig { x: fx(upper_c(4.0)), z: fz(4.0), radius: 5, rate: 120.0, map_rain: 0.0 },
             vec![
                 ObjectConfig { x: fx(upper_c(0.20 * dmax)), z: 0.20, weight: 150.0 },
                 ObjectConfig { x: fx(upper_c(0.34 * dmax)), z: 0.34, weight: 300.0 },
@@ -3010,7 +3040,7 @@ mod tests {
             "levels/cascades.yaml",
             "Cascades",
             &cascades,
-            SourceConfig { x: fx(xs[0]), z: fz(4.0), radius: 5, rate: 120.0 },
+            SourceConfig { x: fx(xs[0]), z: fz(4.0), radius: 5, rate: 120.0, map_rain: 0.0 },
             vec![
                 ObjectConfig { x: fx(xs[1]), z: 0.24, weight: 150.0 },
                 ObjectConfig { x: fx(xs[2]), z: 0.47, weight: 300.0 },
@@ -3117,7 +3147,7 @@ mod tests {
     /// water reaches in `secs` of storm on `terrain`.
     fn town_wet_share(terrain: &[f32], secs: f32) -> f32 {
         let dmax = (D - 1) as f32;
-        let source = Source { x: town_gully_x(6.0).round() as usize, z: 6, radius: 5, rate: TOWN_RATE };
+        let source = Source { x: town_gully_x(6.0).round() as usize, z: 6, radius: 5, rate: TOWN_RATE, map_rain: 0.0 };
         let wet = predict_wet(terrain, &source, secs);
         let square = Vec2::new((W - 1) as f32 * 0.5, TOWN_Z * dmax);
         let terrace: Vec<usize> = (0..W * D)
@@ -3166,7 +3196,7 @@ mod tests {
             "levels/badlands.yaml",
             "Badlands",
             &badlands_height,
-            SourceConfig { x: fx(sx as f32), z: fz(sz as f32), radius: 5, rate: 130.0 },
+            SourceConfig { x: fx(sx as f32), z: fz(sz as f32), radius: 5, rate: 130.0, map_rain: 0.0 },
             vec![
                 ObjectConfig { x: 0.30, z: 0.45, weight: 150.0 },
                 ObjectConfig { x: 0.62, z: 0.55, weight: 300.0 },
@@ -3179,9 +3209,101 @@ mod tests {
             "levels/town-in-peril.yaml",
             "Town in Peril",
             &town_height,
-            SourceConfig { x: fx(town_gully_x(6.0)), z: fz(6.0), radius: 5, rate: TOWN_RATE },
+            SourceConfig { x: fx(town_gully_x(6.0)), z: fz(6.0), radius: 5, rate: TOWN_RATE, map_rain: 0.0 },
             vec![ObjectConfig { x: fx(town_gully_x(0.2 * (D - 1) as f32)), z: 0.2, weight: 150.0 }],
             vec![SceneryKind::Trees, SceneryKind::City],
+        );
+    }
+
+    /// Monsoon: rain falls everywhere, so the land is a catchment. Hillsides
+    /// shed into two side valleys that join a winding main valley; down it sit
+    /// MONSOON_PONDS, each a bowl that fills, spills over its downhill lip and
+    /// feeds the next, on to the drain. A steeper tilt than the badlands keeps
+    /// the water moving once it's out of the ponds.
+    const MONSOON_PONDS: [f32; 3] = [0.32, 0.55, 0.78]; // map-fraction z of each pond's centre
+    const MONSOON_POND_R: f32 = 24.0; // pond radius (cells)
+
+    /// Main valley centre (cells) at row `z`.
+    fn monsoon_valley_x(z: f32) -> f32 {
+        let mid = (W - 1) as f32 * 0.5;
+        mid + 35.0 * (1.6 * PI * z / (D - 1) as f32).sin()
+    }
+
+    fn monsoon_height(x: usize, z: usize) -> f32 {
+        let (xf, zf) = (x as f32, z as f32);
+        let (wmax, dmax) = ((W - 1) as f32, (D - 1) as f32);
+        let p = Vec2::new(xf / wmax, zf / dmax);
+        let trough = |dist: f32, width: f32| (-(dist / width).powi(2)).exp();
+
+        // How much each valley cuts in here (0 = none, 1 = on its centre line).
+        let main = trough((xf - monsoon_valley_x(zf)).abs(), 20.0) * smoothstep(0.05, 0.2, p.y);
+        let mut side = 0.0f32;
+        for (corner_x, join) in [(0.12 * wmax, 0.45), (0.88 * wmax, 0.62)] {
+            // From a back corner, curving in to meet the main valley at `join`.
+            let join_z = join * dmax;
+            if zf <= join_z {
+                let t = zf / join_z;
+                let cx = corner_x + (monsoon_valley_x(join_z) - corner_x) * t * t;
+                side = side.max(trough((xf - cx).abs(), 14.0) * smoothstep(0.0, 0.15, t));
+            }
+        }
+        // 50 of base keeps the cuts near the drain above 0. The bumps are
+        // smoothed out in the valleys so no stray lump turns the water aside.
+        let bumps = 40.0 * rough_ground(p) * (1.0 - 0.7 * main.max(side));
+        let mut h = 50.0 + 70.0 * (1.0 - p.y) + bumps - 22.0 * main - 16.0 * side;
+
+        // Ponds: bowls sunk into the valley floor.
+        for pz in MONSOON_PONDS {
+            let c = Vec2::new(monsoon_valley_x(pz * dmax), pz * dmax);
+            let r = Vec2::new(xf, zf).distance(c);
+            h -= 18.0 * (1.0 - smoothstep(0.5 * MONSOON_POND_R, MONSOON_POND_R, r));
+        }
+
+        h.max(0.0) + edge_rim(x, z)
+    }
+
+    /// Each Monsoon pond holds water: its centre is lower than every cell on a
+    /// ring around it, so rain running in has to fill it before spilling on.
+    /// And the land still falls toward the drain overall.
+    #[test]
+    fn monsoon_ponds_hold_water_and_the_land_drains() {
+        let t: Vec<f32> = (0..W * D).map(|i| monsoon_height(i % W, i / W)).collect();
+        let dmax = (D - 1) as f32;
+        for pz in MONSOON_PONDS {
+            let (cx, cz) = (monsoon_valley_x(pz * dmax), pz * dmax);
+            let bottom = t[idx(cx.round() as usize, cz.round() as usize)];
+            let lip = (0..64)
+                .map(|k| {
+                    let a = k as f32 / 64.0 * TAU;
+                    let (x, z) = (cx + a.cos() * MONSOON_POND_R, cz + a.sin() * MONSOON_POND_R);
+                    t[idx(x.round() as usize, z.round() as usize)]
+                })
+                .fold(f32::MAX, f32::min);
+            assert!(lip > bottom + 3.0, "pond at z={pz} should hold water (bottom {bottom}, lowest lip {lip})");
+        }
+        let row_mean = |z: usize| (0..W).map(|x| t[idx(x, z)]).sum::<f32>() / W as f32;
+        assert!(row_mean(D / 8) > row_mean(D - 1 - D / 8) + 30.0, "monsoon should slope down toward the drain");
+    }
+
+    /// Regenerate Monsoon:
+    ///   cargo test generate_monsoon_level -- --ignored
+    /// No spring — `rate: 0` — the storm rains on the whole map (`map_rain`).
+    #[test]
+    #[ignore]
+    fn generate_monsoon_level() {
+        let dmax = (D - 1) as f32;
+        let at = |z: f32| fx(monsoon_valley_x(z * dmax));
+        bake_with(
+            "levels/monsoon.yaml",
+            "Monsoon",
+            &monsoon_height,
+            SourceConfig { x: at(0.3), z: 0.3, radius: 5, rate: 0.0, map_rain: 0.6 },
+            vec![
+                ObjectConfig { x: at(0.22), z: 0.22, weight: 150.0 },
+                ObjectConfig { x: at(0.44), z: 0.44, weight: 300.0 },
+                ObjectConfig { x: at(0.67), z: 0.67, weight: 1000.0 },
+            ],
+            vec![SceneryKind::Trees, SceneryKind::Ruins],
         );
     }
 
@@ -3236,3 +3358,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

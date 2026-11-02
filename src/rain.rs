@@ -1,5 +1,7 @@
 //! The water source, drawn as a rain cloud: a cluster of low-poly puffs
 //! hovering over the source with rain streaking down onto the source patch.
+//! On a level with `map_rain` (rain everywhere) the cloud instead spreads,
+//! see-through, over the whole map and the rain falls all over it.
 //!
 //! Purely visual — the water itself is still added by `flood::run_source`.
 //! This reads how hard it's raining (`Rainfall`) and shows it:
@@ -15,13 +17,21 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use std::f32::consts::TAU;
 
-use crate::flood::{idx, rain_patch, Paused, Rainfall, Source, Terrain, Water, CELL, D, W};
+use crate::flood::{idx, rain_patch, smoothstep, Paused, Rainfall, Source, Terrain, Water, CELL, D, W};
 
 const CLOUD_HEIGHT: f32 = 80.0; // how far above the source's ground the cloud floats
 const CLOUD_CLEARANCE: f32 = 45.0; // …but always at least this far above the water under it
 const CLOUD_RISE_RATE: f32 = 0.8; // how quickly (1/sec) the cloud eases up as the water rises
 const CLOUD_SPREAD: f32 = 1.2; // cloud width relative to the rain patch
-const DROPS: usize = 900; // size of the raindrop pool (the rain covers a wide patch)
+const DROPS: usize = 900; // raindrops used under a source's cloud (the rain covers a wide patch)
+const MAP_DROPS: usize = 6000; // raindrops used when it rains on the whole map — the pool's size
+const MAP_FALL: f32 = 320.0; // typical drop fall from the map-wide cloud (sets how fast drops cycle)
+const MAP_CLOUD_LIFT: f32 = 250.0; // map-wide cloud height above the highest ground — above the usual camera
+const MAP_CLOUD_FADE: f32 = 80.0; // the map-wide cloud fades out over this as the camera climbs past it
+const MAP_CLOUD_COVER: f32 = 1.1; // map-wide cloud size relative to half the map's width
+const MAP_CLOUD_FLAT: f32 = 0.15; // …and its thickness relative to its width
+const MAP_CLOUD_CLEAR: f32 = 0.12; // map-wide cloud's opacity in fair weather…
+const MAP_CLOUD_STORM: f32 = 0.35; // …and at the storm's height
 const DROP_SPEED: f32 = 140.0; // world units / sec
 const DROPS_AT_FULL: f32 = 0.45; // share of the pool falling at the level's full rate (surges use more)
 const FAIR_WEATHER: Color = Color::srgb(0.95, 0.96, 0.98);
@@ -43,10 +53,39 @@ impl Plugin for RainPlugin {
     }
 }
 
+/// Where the rain falls: under a source's cloud, or over the whole map.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RainArea {
+    Patch,
+    Map,
+}
+
+impl RainArea {
+    fn of(source: &Source) -> Self {
+        if source.map_rain > 0.0 { RainArea::Map } else { RainArea::Patch }
+    }
+
+    /// How many drops of the pool this area uses.
+    fn drops(self) -> usize {
+        match self {
+            RainArea::Patch => DROPS,
+            RainArea::Map => MAP_DROPS,
+        }
+    }
+}
+
+/// Half the map's width in world units (the map is centred on the origin).
+fn half_map() -> f32 {
+    W as f32 * CELL * 0.5
+}
+
 /// The cloud's root entity; its puffs are children.
 #[derive(Component)]
 struct Cloud {
     material: Handle<StandardMaterial>,
+    area: RainArea,
+    /// Where the cloud sits on dry land (set when the level loads).
+    home: Vec3,
     /// Height of the cloud's centre before the gentle bob. Climbs (smoothly)
     /// when the water piling up under the cloud would otherwise swallow it.
     base_y: f32,
@@ -83,7 +122,7 @@ fn spawn_cloud(
         ..default()
     });
     commands
-        .spawn((Cloud { material: material.clone(), base_y: 0.0 }, Transform::default(), Visibility::default()))
+        .spawn((Cloud { material: material.clone(), area: RainArea::Patch, home: Vec3::ZERO, base_y: 0.0 }, Transform::default(), Visibility::default()))
         .with_children(|cloud| {
             for (offset, radius) in PUFFS {
                 cloud.spawn((
@@ -102,7 +141,7 @@ fn spawn_cloud(
         perceptual_roughness: 0.3,
         ..default()
     });
-    for i in 0..DROPS {
+    for i in 0..MAP_DROPS {
         commands.spawn((
             RainDrop(i),
             Mesh3d(streak.clone()),
@@ -125,16 +164,38 @@ fn cloud_center(source: &Source, terrain: &[f32]) -> Vec3 {
     Vec3::new(pos.x, terrain[idx(source.x, source.z)] + CLOUD_HEIGHT, pos.y)
 }
 
-/// Move + size the cloud to the source when the level changes.
-fn place_cloud(source: Res<Source>, terrain: Res<Terrain>, mut cloud: Query<(&mut Cloud, &mut Transform)>) {
+/// Move + size the cloud when the level changes: over the source, or — when
+/// it rains on the whole map — over all of it, high enough that the usual
+/// camera looks in under it, and see-through.
+fn place_cloud(
+    source: Res<Source>,
+    terrain: Res<Terrain>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut cloud: Query<(&mut Cloud, &mut Transform)>,
+) {
     if !source.is_changed() && !terrain.is_changed() {
         return;
     }
-    let size = rain_radius(&source) * CLOUD_SPREAD;
+    let area = RainArea::of(&source);
     for (mut cloud, mut t) in &mut cloud {
-        t.translation = cloud_center(&source, &terrain.0);
-        t.scale = Vec3::splat(size);
-        cloud.base_y = t.translation.y;
+        let (home, scale, alpha_mode) = match area {
+            RainArea::Patch => {
+                (cloud_center(&source, &terrain.0), Vec3::splat(rain_radius(&source) * CLOUD_SPREAD), AlphaMode::Opaque)
+            }
+            RainArea::Map => {
+                let top = terrain.0.iter().fold(0.0f32, |a, &b| a.max(b));
+                let size = half_map() * MAP_CLOUD_COVER;
+                (Vec3::new(0.0, top + MAP_CLOUD_LIFT, 0.0), Vec3::new(size, size * MAP_CLOUD_FLAT, size), AlphaMode::Blend)
+            }
+        };
+        cloud.area = area;
+        cloud.home = home;
+        cloud.base_y = home.y;
+        t.translation = home;
+        t.scale = scale;
+        if let Some(mut m) = materials.get_mut(&cloud.material) {
+            m.alpha_mode = alpha_mode;
+        }
     }
 }
 
@@ -147,17 +208,30 @@ fn animate_cloud(
     terrain: Res<Terrain>,
     water: Res<Water>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    camera: Single<&GlobalTransform, With<Camera3d>>,
     mut cloud: Query<(&mut Cloud, &mut Transform)>,
 ) {
     let t = time.elapsed_secs();
+    let camera_y = camera.translation().y;
     let darkness = rainfall.0.clamp(0.0, 1.0);
-    let target = FAIR_WEATHER.mix(&STORM_GREY, darkness);
     // Rain piles water up into a mound under the cloud (highest at the
     // source cell); stay `CLOUD_CLEARANCE` above it.
     let i = idx(source.x, source.z);
-    let wanted_y = cloud_center(&source, &terrain.0).y.max(terrain.0[i] + water.depth[i] + CLOUD_CLEARANCE);
     let ease = 1.0 - (-time.delta_secs() * CLOUD_RISE_RATE).exp();
     for (mut cloud, mut transform) in &mut cloud {
+        let (wanted_y, target) = match cloud.area {
+            RainArea::Patch => (
+                cloud.home.y.max(terrain.0[i] + water.depth[i] + CLOUD_CLEARANCE),
+                FAIR_WEATHER.mix(&STORM_GREY, darkness),
+            ),
+            // Already above the highest ground; thickens as the storm builds,
+            // and fades away if the camera climbs above it so the land shows.
+            RainArea::Map => {
+                let below = 1.0 - smoothstep(cloud.home.y - MAP_CLOUD_FADE, cloud.home.y, camera_y);
+                let alpha = (MAP_CLOUD_CLEAR + (MAP_CLOUD_STORM - MAP_CLOUD_CLEAR) * darkness) * below;
+                (cloud.home.y, FAIR_WEATHER.mix(&STORM_GREY, darkness).with_alpha(alpha))
+            }
+        };
         cloud.base_y += (wanted_y - cloud.base_y) * ease;
         transform.rotation = Quat::from_rotation_y(t * 0.03);
         transform.translation.y = cloud.base_y + (t * 0.4).sin() * 2.0;
@@ -182,15 +256,18 @@ fn hash01(a: u32, b: u32) -> f32 {
 }
 
 /// Where drop `i` is at time `t`, for a fall of `height`: its offset under the
-/// cloud (x/z, inside a unit circle) and how far down it is (0 = at the cloud,
-/// 1 = at the ground). Each drop starts its falls at a different moment, so
-/// they don't all land together.
-fn drop_state(i: usize, t: f32, height: f32) -> (Vec2, f32) {
+/// cloud (x/z, inside a unit circle for a `Patch`, the square -1..1 for the
+/// `Map`) and how far down it is (0 = at the cloud, 1 = at the ground). Each
+/// drop starts its falls at a different moment, so they don't all land together.
+fn drop_state(i: usize, t: f32, height: f32, area: RainArea) -> (Vec2, f32) {
     let falls = t * DROP_SPEED / height + hash01(i as u32, 0);
     let fall = falls.floor() as u32; // which fall this is — picks the spot
-    let angle = hash01(i as u32, fall * 2 + 1) * TAU;
-    let r = hash01(i as u32, fall * 2 + 2).sqrt(); // sqrt → spread evenly over the disc
-    (Vec2::from_angle(angle) * r, falls.fract())
+    let (a, b) = (hash01(i as u32, fall * 2 + 1), hash01(i as u32, fall * 2 + 2));
+    let offset = match area {
+        RainArea::Patch => Vec2::from_angle(a * TAU) * b.sqrt(), // sqrt → spread evenly over the disc
+        RainArea::Map => Vec2::new(a, b) * 2.0 - 1.0,
+    };
+    (offset, falls.fract())
 }
 
 fn animate_rain(
@@ -209,19 +286,22 @@ fn animate_rain(
         *sim_time += time.delta_secs();
     }
     let t = *sim_time;
-    let top = cloud_center(&source, &terrain.0);
     let start = cloud.base_y - 6.0; // from the cloud's underside
-    let radius = rain_radius(&source);
+    // Centre, spread and fall height of the rain.
+    let (centre, spread, fall) = match cloud.area {
+        RainArea::Patch => (cloud.home, rain_radius(&source), CLOUD_HEIGHT),
+        RainArea::Map => (Vec3::ZERO, half_map(), MAP_FALL),
+    };
     // Drops hidden beyond this index: the pool fills as the rain gets heavier.
-    let falling = (rainfall.0 * DROPS_AT_FULL * DROPS as f32) as usize;
+    let falling = (rainfall.0 * DROPS_AT_FULL * cloud.area.drops() as f32) as usize;
     for (drop, mut transform, mut vis) in &mut drops {
         if drop.0 >= falling {
             *vis = Visibility::Hidden;
             continue;
         }
         *vis = Visibility::Inherited;
-        let (offset, down) = drop_state(drop.0, t, CLOUD_HEIGHT);
-        let xz = Vec2::new(top.x, top.z) + offset * radius;
+        let (offset, down) = drop_state(drop.0, t, fall, cloud.area);
+        let xz = Vec2::new(centre.x, centre.z) + offset * spread;
         // Fall to the surface under the drop — the water if there is any, else the ground.
         let (gx, gz) = crate::flood::cell_of(xz);
         let i = idx(gx.min(W - 1), gz.min(D - 1));
@@ -238,18 +318,42 @@ mod tests {
     fn drops_fall_from_the_cloud_to_the_ground_and_stay_under_it() {
         for i in 0..50 {
             for step in 0..200 {
-                let (offset, down) = drop_state(i, step as f32 * 0.037, CLOUD_HEIGHT);
+                let (offset, down) = drop_state(i, step as f32 * 0.037, CLOUD_HEIGHT, RainArea::Patch);
                 assert!(offset.length() <= 1.0 + 1e-5, "drop strays outside the cloud");
                 assert!((0.0..1.0).contains(&down));
+                let (offset, _) = drop_state(i, step as f32 * 0.037, MAP_FALL, RainArea::Map);
+                assert!(offset.abs().max_element() <= 1.0, "drop strays off the map");
             }
         }
     }
 
     #[test]
     fn a_drop_moves_down_as_time_passes() {
-        let (_, a) = drop_state(7, 0.0, CLOUD_HEIGHT);
-        let (_, b) = drop_state(7, 0.01, CLOUD_HEIGHT);
+        let (_, a) = drop_state(7, 0.0, CLOUD_HEIGHT, RainArea::Patch);
+        let (_, b) = drop_state(7, 0.01, CLOUD_HEIGHT, RainArea::Patch);
         // Unless it just landed and restarted at the top, it's further down.
         assert!(b > a || b < 0.05);
+    }
+
+    /// Map-wide rain reaches every corner of the map, not just the middle.
+    #[test]
+    fn map_rain_spreads_over_the_whole_map() {
+        let mut quadrants = [0; 4];
+        for i in 0..MAP_DROPS {
+            let (o, _) = drop_state(i, 3.0, MAP_FALL, RainArea::Map);
+            quadrants[(o.x > 0.0) as usize + 2 * (o.y > 0.0) as usize] += 1;
+        }
+        for q in quadrants {
+            assert!(q > MAP_DROPS / 5, "rain should fall evenly over the map, got {quadrants:?}");
+        }
+    }
+
+    #[test]
+    fn map_rain_uses_the_map_wide_cloud() {
+        let mut source = Source::default();
+        assert_eq!(RainArea::of(&source), RainArea::Patch);
+        source.map_rain = 0.6;
+        assert_eq!(RainArea::of(&source), RainArea::Map);
+        assert!(RainArea::Map.drops() > RainArea::Patch.drops());
     }
 }

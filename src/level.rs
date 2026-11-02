@@ -53,6 +53,14 @@ pub struct SourceConfig {
     pub radius: i32,
     /// Water depth added per second, spread over the patch.
     pub rate: f32,
+    /// Rain over the WHOLE map as well: water depth added per second to every
+    /// cell. Leave it out (0) for rain only under the cloud.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub map_rain: f32,
+}
+
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
 }
 
 /// A starting object: map-fraction position + weight in kg.
@@ -180,6 +188,17 @@ mod tests {
         assert_eq!(config.scenery, vec![SceneryKind::Trees]);
     }
 
+    /// Older level yamls have no `map_rain:` — rain only under the cloud.
+    #[test]
+    fn test_missing_map_rain_is_off() {
+        let yaml = "name: Old\nheightmap: old.png\nheight_scale: 10.0\nsource: {x: 0.5, z: 0.1, radius: 3, rate: 50.0}\n";
+        let config: LevelConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.source.map_rain, 0.0);
+        let yaml = yaml.replace("rate: 50.0}", "rate: 50.0, map_rain: 0.3}");
+        let config: LevelConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!((config.source.map_rain - 0.3).abs() < 1e-6);
+    }
+
     /// Upsampling a 2×1 black→white gradient: the middle sample is the average.
     #[test]
     fn test_resample_bilinear_midpoint() {
@@ -202,7 +221,7 @@ mod tests {
         let level = LoadedLevel {
             name: "Round Trip".into(),
             heights: heights.clone(),
-            source: SourceConfig { x: 0.5, z: 0.1, radius: 3, rate: 50.0 },
+            source: SourceConfig { x: 0.5, z: 0.1, radius: 3, rate: 50.0, map_rain: 0.0 },
             objects: vec![ObjectConfig { x: 0.25, z: 0.75, weight: 800.0 }],
             scenery: vec![SceneryKind::City, SceneryKind::Ruins],
         };
