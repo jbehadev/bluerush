@@ -829,7 +829,26 @@ Learned: adding an enum variant makes the compiler flag every non-exhaustive `ma
 - Tests: 69 (+5: old yaml has no map rain, map rain wets evenly, Monsoon ponds hold water and
   the land drains, map drops reach every quadrant, only `map_rain` levels get the map cloud).
 
+### Session 36 (Pumps + pipes)
+- **Pump tool** — a **Pump** panel button; press on the intake, drag, release on the outlet
+  (reuses `WallDrag`; a drag shorter than `PUMP_MIN_LEN` places nothing). Erase removes a pump
+  anywhere along its pipe; switching level clears them (`Or<(With<Wall>, With<Pump>)>` query).
+- **`pump_step`** — pure helper: takes up to `PUMP_RATE × DT` from the intake cells, each giving
+  the same *share* of what it holds (never negative), and spreads it evenly over the outlet
+  cells — total water is unchanged. Intake/outlet are 7×7 patches (`PUMP_R`, `patch_cells`) so
+  the intake doesn't dig a pit. `run_pumps` runs after `handle_click`, before the flow.
+- **Visuals** — `spawn_pump`: a housing at each end, the pipe rises, runs `PIPE_CLEARANCE` above
+  the highest ground on the route, and drops into the outlet. One unit cylinder mesh stretched
+  per run (`pipe_run`, `Quat::from_rotation_arc(Vec3::Y, dir)`).
+- **Rust** — `matches!` to share the drag code between two tools; `match` guards
+  (`SelectedTool::Pump if len >= …`); `Or<(With<A>, With<B>)>` query filters.
+- Tests: 73 (+4: pumping conserves water, can't take more than the intake holds, a dry pump
+  moves nothing, patches clip to the map).
+
 ## What Comes Next
+- **Pump polish (next options)** — lift limit (less flow the higher it lifts); water in transit
+  in the pipe (delay); click to toggle on/off / set rate; pumps in level yaml; outlet jet/splash;
+  pipe that follows the ground or a polyline; pipes as breakable obstacles.
 - **Map-wide rain polish (optional)** — faster flow step for all-wet maps; raindrop splashes
   (sparse ripple kicks); drifting cloud puffs; more rain levels.
 - ~~**Breakable walls**~~ Done (session 33). Possible polish: splash/debris when a piece goes,

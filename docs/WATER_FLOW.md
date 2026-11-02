@@ -35,7 +35,8 @@ real water — it runs downhill, pools to a flat level, and spills over obstacle
 |---|--------|------|
 | 1 | `drain_on_key`     | `R` empties all water |
 | 2 | `run_source`       | adds water at the top of the stream (with the wave pattern) |
-| 3 | `handle_click`     | applies the selected tool (place block / drag a wall / pour / erase) |
+| 3 | `handle_click`     | applies the selected tool (place block / drag a wall / pour / erase / drag a pump) |
+|   | `run_pumps`        | each pump moves water from its intake patch to its outlet patch |
 | 4 | `build_obstacles`  | grounded blocks raise an effective floor (damming) |
 | 5 | `step_flow`        | **the core water movement** |
 | 6 | `step_ripples`     | a visual-only ripple layer for liveliness |
@@ -228,6 +229,7 @@ pour/erase (`draw_placement_cursor`).
 - `step_flow` — the relaxation flow + current field + edge drain
 - `step_ripples` — visual ripple wave equation
 - `build_obstacles` — damming floor from grounded blocks, wall pieces and scenery `Blocker`s
+- `run_pumps` / `pump_step` — pumps move up to `PUMP_RATE` water/sec from intake to outlet; each intake cell gives the same share, so it's mass-conserving and never negative
 - `wear_walls` — wall pieces wear under water piled against them (`wall_head`) or pouring over (`wall_overtopped`), then breach
 - `update_water_mesh` — rebuild the clipped, lit water surface
 
@@ -238,8 +240,8 @@ pour/erase (`draw_placement_cursor`).
 - `object_collision` — mass-weighted separation
 
 **Input / UI / camera**
-- `handle_click` — left-click tool dispatch (place / wall / pour / erase); `WallDrag` tracks the drag, `spawn_wall` builds the `Wall` and its `WallPiece`s
-- `setup_ui`, `handle_weight_buttons`, `handle_pour_button`, `handle_erase_button`,
+- `handle_click` — left-click tool dispatch (place / wall / pour / erase / pump); `WallDrag` tracks the drag, `spawn_wall` builds the `Wall` and its `WallPiece`s, `spawn_pump` builds a `Pump` with its housings and pipe
+- `setup_ui`, `handle_weight_buttons`, `handle_pour_button`, `handle_erase_button`, `handle_pump_button`,
   `handle_wave_buttons`, `update_tool_highlight`, `update_wave_highlight`
 - `camera_controls` — orbit / pan / zoom (`OrbitCamera`)
 - `draw_placement_cursor` — placement preview gizmo
